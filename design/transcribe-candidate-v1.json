@@ -1,0 +1,207 @@
+{
+  "schema": "kilix.transcribe.design/candidate-v1",
+  "status": "PREP7_DESIGN_CANDIDATE_NOT_SELECTED",
+  "commands": [
+    "record",
+    "file",
+    "serve",
+    "models",
+    "status",
+    "cancel",
+    "unload"
+  ],
+  "tasks": [
+    "transcribe",
+    "translate",
+    "diarize"
+  ],
+  "outputs": [
+    "text",
+    "json",
+    "webvtt",
+    "srt"
+  ],
+  "transport": {
+    "family": "AF_UNIX",
+    "type": "SOCK_SEQPACKET",
+    "peer_identity": "SO_PEERCRED_EFFECTIVE_UID",
+    "runtime_directory_mode": "0700",
+    "socket_mode": "0600",
+    "control_frame_bytes": 65536,
+    "audio_transfer": "SCM_RIGHTS_DESCRIPTOR"
+  },
+  "decoder_limits": {
+    "input_bytes": 2147483648,
+    "duration_ms": 14400000,
+    "sample_rate_hz": 384000,
+    "channels": 32,
+    "address_space_bytes": 2147483648,
+    "cpu_threads": 4
+  },
+  "source_objects": [
+    {
+      "id": "whisper.cpp",
+      "commit": "371b5a7561823ab2bb32142d2751e35e7534727b",
+      "tree": "3d7ce4f956997cfa325c7556533aba5604278463",
+      "route": "whisper-cpp",
+      "selected": false
+    },
+    {
+      "id": "openai-whisper",
+      "commit": "31243bad24cc746f07d4c8bfdd2d974872cb1803",
+      "tree": "061ecdd5038d3c824f714bc77b272ad10c1b1dad",
+      "route": "openai-pytorch",
+      "selected": false
+    },
+    {
+      "id": "faster-whisper",
+      "commit": "65882eee9f5cdbeeb2d877f1131d48cf241b327d",
+      "tree": "7f396ce8d3316df36f674183aea9ff00ff946637",
+      "route": "faster-whisper",
+      "selected": false,
+      "required_repair": "THIRD_PARTY_NOTICE"
+    },
+    {
+      "id": "ctranslate2",
+      "commit": "0d8bcd362ac75ef860ef161d6f0efad0ae439ff0",
+      "tree": "3f2df7ccdec126f6d180367a9906c21221105a26",
+      "route": "faster-whisper",
+      "selected": false
+    },
+    {
+      "id": "sherpa-onnx",
+      "commit": "1cb484af5e69d3c7803c1eb0b3b5ab8041e0e911",
+      "tree": "58c9772e226857cacaa16038bd241e3c3ca77f9a",
+      "route": "sherpa-diarization",
+      "selected": false
+    },
+    {
+      "id": "3d-speaker",
+      "commit": "065629c313eaf1a01c65c640c46d77e61e9607b4",
+      "tree": "fc152f91be157ef32cc52009b4e147dccbcf2a6a",
+      "route": "sherpa-diarization",
+      "selected": false,
+      "required_repair": "REPRODUCIBLE_LOCAL_CAMPP_EXPORT"
+    },
+    {
+      "id": "campplus-model",
+      "commit": "032b8131a7ad812f87061955ca974c99060c5a03",
+      "tree": "e7a3d915a1b6e7d8ea1eaba68d8472874e1a6145",
+      "route": "sherpa-diarization",
+      "selected": false,
+      "payload_sha256": "5b1a88b6f8d85826fabef804779c3372b42f3af21457fa48bd5c097c0686b2de"
+    },
+    {
+      "id": "pyannote-segmentation-onnx-model",
+      "commit": "9403a6902bb58e3d5ae8c7e77c3422de279db2e0",
+      "tree": "5d65ac109661b27dd3daaa16a0e71b2df20b0ea4",
+      "route": "sherpa-diarization",
+      "selected": false,
+      "payload_sha256": "220ad67ca923bef2fa91f2390c786097bf305bceb5e261d4af67b38e938e1079"
+    }
+  ],
+  "engine_routes": [
+    {
+      "id": "whisper-cpp",
+      "selected": false,
+      "runtime_pickle": false
+    },
+    {
+      "id": "openai-pytorch",
+      "selected": false,
+      "runtime_pickle": false,
+      "note": "Direct pt checkpoint loading remains prohibited"
+    },
+    {
+      "id": "faster-whisper",
+      "selected": false,
+      "runtime_pickle": false,
+      "required_repair": "THIRD_PARTY_NOTICE"
+    },
+    {
+      "id": "sherpa-diarization",
+      "selected": false,
+      "runtime_pickle": false,
+      "required_repair": "REPRODUCIBLE_LOCAL_CAMPP_EXPORT"
+    }
+  ],
+  "capture_stop_conditions": [
+    "explicit_cancel",
+    "client_disconnect",
+    "deadline",
+    "screen_lock",
+    "provider_failure"
+  ],
+  "forbidden_request_fields": [
+    "path",
+    "url",
+    "command",
+    "shell",
+    "executable",
+    "environment",
+    "module",
+    "import"
+  ],
+  "excluded_capabilities": [
+    "cloud_transcription",
+    "always_listening_or_wake_words",
+    "autonomous_terminal_execution",
+    "meeting_surveillance",
+    "unauthenticated_lan_service"
+  ],
+  "retention": {
+    "transcripts_by_default": false,
+    "audio_by_default": false,
+    "logs_contain_content": false
+  },
+  "requirements": [
+    {"id":"TR-001","category":"boundary","requirement":"Provider owns explicit capture and local-file transcription only","evidence_phase":"P1"},
+    {"id":"TR-002","category":"boundary","requirement":"Model installation remains outside the provider","evidence_phase":"P3"},
+    {"id":"TR-003","category":"boundary","requirement":"Hardware recommendation remains outside the provider","evidence_phase":"P2"},
+    {"id":"TR-004","category":"boundary","requirement":"Voicebox history remains outside the provider","evidence_phase":"P8"},
+    {"id":"TR-005","category":"boundary","requirement":"Cloud and LAN service remain excluded","evidence_phase":"P1"},
+    {"id":"TR-006","category":"boundary","requirement":"Vosk remains the independent immediate fallback","evidence_phase":"P7"},
+    {"id":"TR-007","category":"transport","requirement":"Use a private per-user Unix socket","evidence_phase":"P1"},
+    {"id":"TR-008","category":"transport","requirement":"Verify peer effective UID before parsing","evidence_phase":"P1"},
+    {"id":"TR-009","category":"transport","requirement":"Bound every control packet","evidence_phase":"P1"},
+    {"id":"TR-010","category":"transport","requirement":"Transfer audio only by pre-opened descriptor","evidence_phase":"P1"},
+    {"id":"TR-011","category":"transport","requirement":"Reject caller paths URLs and executable fields","evidence_phase":"P1"},
+    {"id":"TR-012","category":"transport","requirement":"Reject incompatible major versions","evidence_phase":"P1"},
+    {"id":"TR-013","category":"cli","requirement":"Provide record command","evidence_phase":"P5"},
+    {"id":"TR-014","category":"cli","requirement":"Provide file command","evidence_phase":"P5"},
+    {"id":"TR-015","category":"cli","requirement":"Provide serve command","evidence_phase":"P5"},
+    {"id":"TR-016","category":"cli","requirement":"Provide models command","evidence_phase":"P5"},
+    {"id":"TR-017","category":"cli","requirement":"Provide status command","evidence_phase":"P5"},
+    {"id":"TR-018","category":"cli","requirement":"Provide cancel command","evidence_phase":"P5"},
+    {"id":"TR-019","category":"cli","requirement":"Provide unload command","evidence_phase":"P5"},
+    {"id":"TR-020","category":"input","requirement":"Decode in a constrained subprocess","evidence_phase":"P5"},
+    {"id":"TR-021","category":"input","requirement":"Bound input bytes and duration","evidence_phase":"P5"},
+    {"id":"TR-022","category":"input","requirement":"Bound sample rate and channel count","evidence_phase":"P5"},
+    {"id":"TR-023","category":"input","requirement":"Bound decoder CPU memory and wall clock","evidence_phase":"P5"},
+    {"id":"TR-024","category":"input","requirement":"Forbid network protocol decoding","evidence_phase":"P5"},
+    {"id":"TR-025","category":"input","requirement":"Require explicit foreground microphone gesture","evidence_phase":"P5"},
+    {"id":"TR-026","category":"input","requirement":"Terminate capture on all five stop conditions","evidence_phase":"P5"},
+    {"id":"TR-027","category":"output","requirement":"Emit unstable partials with stable replacements","evidence_phase":"P5"},
+    {"id":"TR-028","category":"output","requirement":"Expose engine and model identity in every result","evidence_phase":"P5"},
+    {"id":"TR-029","category":"output","requirement":"Emit language and segment timestamps","evidence_phase":"P5"},
+    {"id":"TR-030","category":"output","requirement":"Emit bounded word timestamps when supported","evidence_phase":"P5"},
+    {"id":"TR-031","category":"output","requirement":"Emit explicit-session speaker labels with confidence","evidence_phase":"P5"},
+    {"id":"TR-032","category":"output","requirement":"Serialize text JSON WebVTT and SRT","evidence_phase":"P5"},
+    {"id":"TR-033","category":"output","requirement":"Commit command outputs atomically","evidence_phase":"P5"},
+    {"id":"TR-034","category":"output","requirement":"Commit no partial output after refusal or cancellation","evidence_phase":"P5"},
+    {"id":"TR-035","category":"engine","requirement":"Compare all four architecture routes before selection","evidence_phase":"P2"},
+    {"id":"TR-036","category":"engine","requirement":"Use one versioned corpus across ASR candidates","evidence_phase":"P2"},
+    {"id":"TR-037","category":"engine","requirement":"Prohibit runtime pickle loading","evidence_phase":"P2"},
+    {"id":"TR-038","category":"engine","requirement":"Repair faster-whisper notices if selected","evidence_phase":"P2"},
+    {"id":"TR-039","category":"engine","requirement":"Reproduce CAMPP export locally if selected","evidence_phase":"P2"},
+    {"id":"TR-040","category":"engine","requirement":"Keep engine identity stable for a pinned profile","evidence_phase":"P2"},
+    {"id":"TR-041","category":"lifecycle","requirement":"Keep cancel and status responsive while a worker runs","evidence_phase":"P5"},
+    {"id":"TR-042","category":"lifecycle","requirement":"Terminate a worker when cooperative cancellation misses its bound","evidence_phase":"P5"},
+    {"id":"TR-043","category":"lifecycle","requirement":"Return measurable memory on unload","evidence_phase":"P5"},
+    {"id":"TR-044","category":"lifecycle","requirement":"Bound queues without inventing the shared accelerator broker","evidence_phase":"P6"},
+    {"id":"TR-045","category":"privacy","requirement":"Retain no transcript or audio by default","evidence_phase":"P5"},
+    {"id":"TR-046","category":"privacy","requirement":"Redact text paths audio tokens and raw exceptions from logs","evidence_phase":"P5"},
+    {"id":"TR-047","category":"privacy","requirement":"Display a persistent capture indicator and stop action","evidence_phase":"P5"},
+    {"id":"TR-048","category":"privacy","requirement":"Never submit text or synthesize terminal input automatically","evidence_phase":"P7"}
+  ]
+}
