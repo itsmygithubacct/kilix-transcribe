@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import math
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Iterable
 
@@ -31,6 +31,7 @@ PROVIDER_REFUSAL = (
 # fields, release thresholds, or an accepted P1 contract.
 MAX_SEGMENTS = 100_000
 MAX_WORDS_PER_SEGMENT = 100_000
+MAX_RESULT_WORDS = 100_000
 MAX_SEGMENT_TEXT_BYTES = 1_048_576
 MAX_RESULT_TEXT_BYTES = 16_777_216
 MAX_ID_BYTES = 256
@@ -87,6 +88,13 @@ def _bounded_text(value: object, code: str, name: str) -> str:
     _require(not _CONTROL_CHARACTERS.search(value), code,
              f"{name} contains a forbidden control character")
     normalized = value.replace("\r\n", "\n").replace("\r", "\n")
+    _require(
+        not normalized.startswith("\n")
+        and not normalized.endswith("\n")
+        and "\n\n" not in normalized,
+        code,
+        f"{name} contains a blank subtitle line",
+    )
     _require(len(normalized.encode("utf-8")) <= MAX_SEGMENT_TEXT_BYTES,
              code, f"{name} exceeds the candidate text bound")
     return normalized
@@ -202,6 +210,7 @@ class Transcript:
 
         identities: set[int] = set()
         total_text_bytes = 0
+        total_words = 0
         for segment in self.segments:
             _require(isinstance(segment, SegmentUpdate), "SEGMENT_TYPE",
                      "every segment must be a SegmentUpdate")
@@ -211,8 +220,12 @@ class Transcript:
                      "final result contains a duplicate segment_id")
             identities.add(segment.segment_id)
             total_text_bytes += len(segment.text.encode("utf-8"))
-        _require(total_text_bytes <= MAX_RESULT_TEXT_BYTES, "RESULT_TEXT",
-                 "result text exceeds the candidate bound")
+            total_words += len(segment.words)
+            _require(total_words <= MAX_RESULT_WORDS, "WORD_POPULATION",
+                     "aggregate word population exceeds the candidate bound")
+            total_text_bytes += sum(len(word.text.encode("utf-8")) for word in segment.words)
+            _require(total_text_bytes <= MAX_RESULT_TEXT_BYTES, "RESULT_TEXT",
+                     "result text exceeds the candidate bound")
 
 
 class TranscriptAssembler:
@@ -306,6 +319,12 @@ def _escape_cue(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+def _bounded_rendered(value: str) -> str:
+    _require(len(value.encode("utf-8")) <= MAX_RESULT_TEXT_BYTES,
+             "RESULT_TEXT", "serialized result exceeds the candidate byte bound")
+    return value
+
+
 def render_transcript(transcript: Transcript, output: str) -> str:
     """Render a final result to one of the exact 4/4 candidate formats."""
 
@@ -315,7 +334,7 @@ def render_transcript(transcript: Transcript, output: str) -> str:
 
     if output == "text":
         text = "\n".join(segment.text for segment in transcript.segments)
-        return f"{text}\n" if text else ""
+        return _bounded_rendered(f"{text}\n" if text else "")
 
     if output == "json":
         payload = {
@@ -326,12 +345,13 @@ def render_transcript(transcript: Transcript, output: str) -> str:
             "segments": [_segment_payload(segment) for segment in transcript.segments],
             "task": transcript.task,
         }
-        return json.dumps(
+        rendered = json.dumps(
             payload,
             ensure_ascii=False,
             separators=(",", ":"),
             sort_keys=True,
         ) + "\n"
+        return _bounded_rendered(rendered)
 
     separator = "." if output == "webvtt" else ","
     blocks: list[str] = []
@@ -341,8 +361,10 @@ def render_transcript(transcript: Transcript, output: str) -> str:
         blocks.append(f"{index}\n{start} --> {end}\n{_escape_cue(segment.text)}")
 
     if output == "webvtt":
-        return "WEBVTT\n\n" + "\n\n".join(blocks) + ("\n" if blocks else "")
-    return "\n\n".join(blocks) + ("\n" if blocks else "")
+        return _bounded_rendered(
+            "WEBVTT\n\n" + "\n\n".join(blocks) + ("\n" if blocks else "")
+        )
+    return _bounded_rendered("\n\n".join(blocks) + ("\n" if blocks else ""))
 
 
 class JobState(str, Enum):
@@ -354,25 +376,39 @@ class JobState(str, Enum):
     FAILED = "failed"
 
 
-@dataclass(slots=True)
 class JobLifecycle:
     """A deterministic job state machine with one terminal result at most."""
 
-    state: JobState = JobState.QUEUED
-    result: Transcript | None = field(default=None, init=False)
-    failure_code: str | None = field(default=None, init=False)
+    __slots__ = ("_failure_code", "_result", "_state")
+
+    def __init__(self) -> None:
+        self._state = JobState.QUEUED
+        self._result: Transcript | None = None
+        self._failure_code: str | None = None
+
+    @property
+    def state(self) -> JobState:
+        return self._state
+
+    @property
+    def result(self) -> Transcript | None:
+        return self._result
+
+    @property
+    def failure_code(self) -> str | None:
+        return self._failure_code
 
     def start(self) -> JobState:
         _require(self.state is JobState.QUEUED, "JOB_TRANSITION",
                  "only a queued job can start")
-        self.state = JobState.RUNNING
+        self._state = JobState.RUNNING
         return self.state
 
     def request_cancel(self) -> JobState:
         if self.state is JobState.QUEUED:
-            self.state = JobState.CANCELED
+            self._state = JobState.CANCELED
         elif self.state is JobState.RUNNING:
-            self.state = JobState.CANCEL_REQUESTED
+            self._state = JobState.CANCEL_REQUESTED
         elif self.state not in {JobState.CANCEL_REQUESTED, JobState.CANCELED}:
             raise SurfaceError("JOB_TERMINAL", "a terminal job cannot be canceled")
         return self.state
@@ -380,7 +416,7 @@ class JobLifecycle:
     def acknowledge_cancel(self) -> JobState:
         _require(self.state is JobState.CANCEL_REQUESTED, "JOB_TRANSITION",
                  "only a cancel-requested job can acknowledge cancellation")
-        self.state = JobState.CANCELED
+        self._state = JobState.CANCELED
         return self.state
 
     def complete(self, result: Transcript) -> JobState:
@@ -388,16 +424,16 @@ class JobLifecycle:
                  "only a running job can complete")
         _require(isinstance(result, Transcript), "RESULT_TYPE",
                  "completion requires a final Transcript")
-        self.result = result
-        self.state = JobState.SUCCEEDED
+        self._result = result
+        self._state = JobState.SUCCEEDED
         return self.state
 
     def fail(self, code: str) -> JobState:
         _require(self.state in {JobState.QUEUED, JobState.RUNNING, JobState.CANCEL_REQUESTED},
                  "JOB_TERMINAL", "a terminal job cannot fail again")
-        self.failure_code = _bounded_identity(code, "FAILURE_CODE", "failure code")
-        self.result = None
-        self.state = JobState.FAILED
+        self._failure_code = _bounded_identity(code, "FAILURE_CODE", "failure code")
+        self._result = None
+        self._state = JobState.FAILED
         return self.state
 
 

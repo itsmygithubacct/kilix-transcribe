@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import fcntl
 import hashlib
 import json
 import os
@@ -118,14 +119,34 @@ class RequestTests(unittest.TestCase):
         value["args"]["audio_fd"] = 1
         self.refusal(value, "DESCRIPTOR_MISMATCH")
 
+    def test_unhashable_audio_media_type_is_stably_refused(self) -> None:
+        for malformed in ([], {}):
+            with self.subTest(malformed=malformed):
+                value = submit_payload()
+                value["args"]["audio"]["media_type"] = malformed
+                self.refusal(value, "UNSUPPORTED_CAPABILITY")
+
     def test_audio_descriptor_is_bound_to_digest_and_length(self) -> None:
         value = submit_payload()
         request = ProviderRequest.from_payload(value)
         with tempfile.TemporaryFile() as audio:
             audio.write(b"RIFF")
             audio.flush()
-            self.assertEqual(verify_request_descriptors(request, (audio.fileno(),)),
-                             audio.fileno())
+            snapshot = verify_request_descriptors(request, (audio.fileno(),))
+            self.assertIsNotNone(snapshot)
+            assert snapshot is not None
+            try:
+                self.assertNotEqual(snapshot, audio.fileno())
+                self.assertEqual(
+                    fcntl.fcntl(snapshot, fcntl.F_GETFL) & os.O_ACCMODE,
+                    os.O_RDONLY,
+                )
+                audio.seek(0)
+                audio.write(b"WAVE")
+                audio.flush()
+                self.assertEqual(os.pread(snapshot, 4, 0), b"RIFF")
+            finally:
+                os.close(snapshot)
             value["args"]["audio"]["sha256"] = "0" * 64
             with self.assertRaises(ProtocolError) as caught:
                 verify_request_descriptors(ProviderRequest.from_payload(value),

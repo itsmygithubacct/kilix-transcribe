@@ -9,6 +9,7 @@ counting, peer credential checks, and bounded ``SOCK_SEQPACKET`` I/O.
 from __future__ import annotations
 
 import array
+import fcntl
 import hashlib
 import json
 import math
@@ -16,6 +17,7 @@ import os
 import socket
 import stat
 import struct
+import tempfile
 from dataclasses import dataclass
 from typing import Any
 
@@ -303,7 +305,8 @@ class ProviderRequest:
         _require(type(digest) is str and len(digest) == 64
                  and all(character in "0123456789abcdef" for character in digest),
                  "DESCRIPTOR_MISMATCH", "audio SHA-256 is not canonical")
-        _require(audio["media_type"] in {"audio/wav", "audio/flac", "audio/ogg"},
+        _require(type(audio["media_type"]) is str
+                 and audio["media_type"] in {"audio/wav", "audio/flac", "audio/ogg"},
                  "UNSUPPORTED_CAPABILITY", "audio media type is unsupported")
         diarization = arguments.get("diarization_session", False)
         _require(type(diarization) is bool, "INVALID_REQUEST",
@@ -393,6 +396,7 @@ def verify_request_descriptors(
              "submit requires exactly 1/1 audio descriptor")
     descriptor = descriptors[0]
     audio = request.arguments["audio"]
+    snapshot = -1
     try:
         before = os.fstat(descriptor)
         _require(stat.S_ISREG(before.st_mode), "DESCRIPTOR_MISMATCH",
@@ -402,12 +406,34 @@ def verify_request_descriptors(
         _require(before.st_size == audio["byte_length"], "DESCRIPTOR_MISMATCH",
                  "audio descriptor length disagrees with metadata")
         digest = hashlib.sha256()
+        writer = tempfile.TemporaryFile(prefix="kilix-transcribe-audio-")
         offset = 0
-        while offset < before.st_size:
-            chunk = os.pread(descriptor, min(1024 * 1024, before.st_size - offset), offset)
-            _require(bool(chunk), "DESCRIPTOR_MISMATCH", "audio descriptor ended early")
-            digest.update(chunk)
-            offset += len(chunk)
+        try:
+            while offset < before.st_size:
+                chunk = os.pread(
+                    descriptor,
+                    min(1024 * 1024, before.st_size - offset),
+                    offset,
+                )
+                _require(bool(chunk), "DESCRIPTOR_MISMATCH", "audio descriptor ended early")
+                digest.update(chunk)
+                view = memoryview(chunk)
+                while view:
+                    written = os.write(writer.fileno(), view)
+                    _require(written > 0, "TRANSPORT_ERROR", "audio snapshot write stalled")
+                    view = view[written:]
+                offset += len(chunk)
+            snapshot = os.open(
+                f"/proc/self/fd/{writer.fileno()}",
+                os.O_RDONLY | getattr(os, "O_CLOEXEC", 0),
+            )
+            _require(
+                fcntl.fcntl(snapshot, fcntl.F_GETFL) & os.O_ACCMODE == os.O_RDONLY,
+                "TRANSPORT_ERROR",
+                "audio snapshot is not read-only",
+            )
+        finally:
+            writer.close()
         after = os.fstat(descriptor)
         _require((after.st_dev, after.st_ino, after.st_size)
                  == (before.st_dev, before.st_ino, before.st_size),
@@ -415,10 +441,14 @@ def verify_request_descriptors(
         _require(digest.hexdigest() == audio["sha256"], "DESCRIPTOR_MISMATCH",
                  "audio descriptor digest disagrees with metadata")
     except ProtocolError:
+        if snapshot >= 0:
+            os.close(snapshot)
         raise
     except OSError as error:
+        if snapshot >= 0:
+            os.close(snapshot)
         raise ProtocolError("TRANSPORT_ERROR", "audio descriptor verification failed") from error
-    return descriptor
+    return snapshot
 
 
 def peer_effective_uid(channel: socket.socket) -> int:

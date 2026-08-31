@@ -82,6 +82,22 @@ class ValueTests(unittest.TestCase):
     def test_crlf_is_normalized(self) -> None:
         self.assertEqual(SegmentUpdate(0, 0, 0, 1, "a\r\nb", True).text, "a\nb")
 
+    def test_blank_subtitle_lines_are_refused(self) -> None:
+        for text in ("\nleading", "middle\n\nblank", "trailing\n"):
+            with self.subTest(text=text):
+                self.refusal(
+                    lambda: SegmentUpdate(0, 0, 0, 1, text, True),
+                    "SEGMENT_TEXT",
+                )
+
+    def test_aggregate_word_text_is_bounded(self) -> None:
+        word = WordTiming(0, 1, "x" * 1_048_576)
+        segment = SegmentUpdate(0, 0, 0, 1, "x", True, (word,) * 17)
+        self.refusal(
+            lambda: Transcript("transcribe", "engine", "model", "en", (segment,)),
+            "RESULT_TEXT",
+        )
+
 
 class AssemblerTests(unittest.TestCase):
     def refusal(self, action, code: str) -> None:
@@ -168,6 +184,21 @@ class SerializationTests(unittest.TestCase):
 
 
 class LifecycleTests(unittest.TestCase):
+    def test_state_fields_are_read_only(self) -> None:
+        job = JobLifecycle()
+        for name, value in (
+            ("state", JobState.SUCCEEDED),
+            ("result", result_fixture()),
+            ("failure_code", "FABRICATED"),
+        ):
+            with self.subTest(name=name):
+                with self.assertRaises(AttributeError):
+                    setattr(job, name, value)
+
+    def test_initial_state_cannot_be_injected(self) -> None:
+        with self.assertRaises(TypeError):
+            JobLifecycle(JobState.SUCCEEDED)  # type: ignore[call-arg]
+
     def test_success_has_exactly_one_result(self) -> None:
         job = JobLifecycle()
         job.start()
