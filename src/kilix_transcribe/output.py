@@ -40,7 +40,8 @@ class AtomicTranscriptStore:
     def commit(self, name: str, transcript: Transcript, output: str) -> Path:
         _require(type(name) is str and _NAME.fullmatch(name) is not None,
                  "OUTPUT_NAME", "output name is outside its safe population")
-        _require(output in OUTPUTS, "OUTPUT", "output format is unsupported")
+        _require(type(output) is str and output in OUTPUTS,
+                 "OUTPUT", "output format is unsupported")
         rendered = render_transcript(transcript, output).encode("utf-8")
         destination = self._root / f"{name}{_SUFFIX[output]}"
         temporary = self._root / f".{name}.{uuid.uuid4().hex}.partial"

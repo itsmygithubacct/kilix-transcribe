@@ -286,12 +286,14 @@ class ProviderRequest:
         optional = {"diarization_session"}
         _require(required <= set(arguments) <= required | optional,
                  "INVALID_REQUEST", "submit argument population is invalid")
-        _require(arguments["task"] in TASKS, "UNSUPPORTED_CAPABILITY", "task is unsupported")
+        _require(type(arguments["task"]) is str and arguments["task"] in TASKS,
+                 "UNSUPPORTED_CAPABILITY", "task is unsupported")
         language = arguments["language"]
         _require(language is None or (type(language) is str
                                       and _utf8_size(language) <= MAX_LANGUAGE_UTF8_BYTES),
                  "INVALID_REQUEST", "language hint is invalid")
-        _require(arguments["output"] in OUTPUTS, "UNSUPPORTED_CAPABILITY",
+        _require(type(arguments["output"]) is str and arguments["output"] in OUTPUTS,
+                 "UNSUPPORTED_CAPABILITY",
                  "output format is unsupported")
         _require(type(arguments["audio_fd"]) is int and arguments["audio_fd"] == 0,
                  "DESCRIPTOR_MISMATCH", "audio descriptor index must be 0")

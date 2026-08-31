@@ -24,7 +24,7 @@ from kilix_transcribe.protocol import (
     unframe_payload,
     verify_request_descriptors,
 )
-from kilix_transcribe.surface import SegmentUpdate, TranscriptAssembler
+from kilix_transcribe.surface import SegmentUpdate, SurfaceError, TranscriptAssembler
 
 
 def submit_payload() -> dict:
@@ -119,12 +119,16 @@ class RequestTests(unittest.TestCase):
         value["args"]["audio_fd"] = 1
         self.refusal(value, "DESCRIPTOR_MISMATCH")
 
-    def test_unhashable_audio_media_type_is_stably_refused(self) -> None:
-        for malformed in ([], {}):
-            with self.subTest(malformed=malformed):
-                value = submit_payload()
-                value["args"]["audio"]["media_type"] = malformed
-                self.refusal(value, "UNSUPPORTED_CAPABILITY")
+    def test_unhashable_submit_enums_are_stably_refused(self) -> None:
+        for field in ("task", "output", "media_type"):
+            for malformed in ([], {}):
+                with self.subTest(field=field, malformed=malformed):
+                    value = submit_payload()
+                    if field == "media_type":
+                        value["args"]["audio"][field] = malformed
+                    else:
+                        value["args"][field] = malformed
+                    self.refusal(value, "UNSUPPORTED_CAPABILITY")
 
     def test_audio_descriptor_is_bound_to_digest_and_length(self) -> None:
         value = submit_payload()
@@ -232,6 +236,13 @@ class AtomicOutputTests(unittest.TestCase):
             store = AtomicTranscriptStore(root)
             with self.assertRaisesRegex(Exception, "safe population"):
                 store.commit("../escape", self.transcript(), "text")
+            for malformed in ([], {}):
+                with self.subTest(malformed=malformed):
+                    with self.assertRaises(SurfaceError) as caught:
+                        store.commit(
+                            "job-1", self.transcript(), malformed  # type: ignore[arg-type]
+                        )
+                    self.assertEqual(caught.exception.code, "OUTPUT")
             os.chmod(root, 0o755)
             with self.assertRaisesRegex(Exception, "not private"):
                 AtomicTranscriptStore(root)

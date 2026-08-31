@@ -51,7 +51,7 @@ make check
 
 The check validates the exact values of the 48/48 requirement ledger and 8/8
 accepted P0 source objects, 4/4 unselected architecture routes, 7/7 commands,
-4/4 outputs, 11/11 committed checker negative controls, and 63/63 discovered
+4/4 outputs, 11/11 committed checker negative controls, and 64/64 discovered
 unit tests
 using only Python's standard library.
 

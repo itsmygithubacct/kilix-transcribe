@@ -98,6 +98,20 @@ class ValueTests(unittest.TestCase):
             "RESULT_TEXT",
         )
 
+    def test_unhashable_tasks_are_stably_refused(self) -> None:
+        for malformed in ([], {}):
+            with self.subTest(malformed=malformed):
+                self.refusal(
+                    lambda: Transcript(
+                        malformed, "engine", "model", "en", ()  # type: ignore[arg-type]
+                    ),
+                    "TASK",
+                )
+                self.refusal(
+                    lambda: TranscriptAssembler(malformed),  # type: ignore[arg-type]
+                    "TASK",
+                )
+
 
 class AssemblerTests(unittest.TestCase):
     def refusal(self, action, code: str) -> None:
@@ -172,9 +186,13 @@ class SerializationTests(unittest.TestCase):
         self.assertTrue(rendered.startswith("1\n00:00:00,000 --> 00:00:00,900\n"))
 
     def test_unknown_output_is_refused(self) -> None:
-        with self.assertRaises(SurfaceError) as caught:
-            render_transcript(self.result, "xml")
-        self.assertEqual(caught.exception.code, "OUTPUT")
+        for malformed in ("xml", [], {}):
+            with self.subTest(malformed=malformed):
+                with self.assertRaises(SurfaceError) as caught:
+                    render_transcript(
+                        self.result, malformed  # type: ignore[arg-type]
+                    )
+                self.assertEqual(caught.exception.code, "OUTPUT")
 
     def test_empty_result_serializers_are_deterministic(self) -> None:
         empty = Transcript("transcribe", "e", "m", "und", ())

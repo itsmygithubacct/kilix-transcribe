@@ -193,7 +193,8 @@ class Transcript:
     segments: tuple[SegmentUpdate, ...]
 
     def __post_init__(self) -> None:
-        _require(self.task in TASKS, "TASK", "task is outside the 3/3 candidate population")
+        _require(type(self.task) is str and self.task in TASKS,
+                 "TASK", "task is outside the 3/3 candidate population")
         object.__setattr__(
             self, "engine_id", _bounded_identity(self.engine_id, "ENGINE_ID", "engine_id")
         )
@@ -232,7 +233,8 @@ class TranscriptAssembler:
     """Apply unstable replacements and seal only a completely stable result."""
 
     def __init__(self, task: str) -> None:
-        _require(task in TASKS, "TASK", "task is outside the 3/3 candidate population")
+        _require(type(task) is str and task in TASKS,
+                 "TASK", "task is outside the 3/3 candidate population")
         self._task = task
         self._segments: dict[int, SegmentUpdate] = {}
         self._sealed = False
@@ -330,7 +332,8 @@ def render_transcript(transcript: Transcript, output: str) -> str:
 
     _require(isinstance(transcript, Transcript), "RESULT_TYPE",
              "transcript must be a final Transcript")
-    _require(output in OUTPUTS, "OUTPUT", "output is outside the 4/4 candidate population")
+    _require(type(output) is str and output in OUTPUTS,
+             "OUTPUT", "output is outside the 4/4 candidate population")
 
     if output == "text":
         text = "\n".join(segment.text for segment in transcript.segments)
