@@ -48,9 +48,20 @@ def memory_file() -> int:
 
 def digest_file(path: Path) -> str:
     digest = hashlib.sha256()
-    with path.open("rb") as source:
-        for block in iter(lambda: source.read(1024 * 1024), b""):
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    with os.fdopen(descriptor, "rb") as source:
+        info = os.fstat(source.fileno())
+        if not stat.S_ISREG(info.st_mode):
+            raise ProtocolError("INVALID_RUNTIME", "runtime source is not a regular file")
+        remaining = info.st_size
+        while remaining:
+            block = source.read(min(remaining, 1024 * 1024))
+            if not block:
+                raise ProtocolError("INVALID_RUNTIME", "runtime source ended early")
             digest.update(block)
+            remaining -= len(block)
+        if os.fstat(source.fileno()).st_size != info.st_size:
+            raise ProtocolError("INVALID_RUNTIME", "runtime source size changed")
     return digest.hexdigest()
 
 
@@ -139,24 +150,30 @@ class InstalledRuntime:
                 raise ProtocolError("INVALID_RUNTIME", "runtime directory identity changed")
             for name, expected in self.manifest["files"].items():
                 check()
-                source = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=root_fd)
-                snapshot = memory_file()
+                source = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=root_fd)
+                snapshot = -1
                 try:
                     before = os.fstat(source)
                     if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.geteuid()
-                            or before.st_mode & 0o022):
+                            or before.st_mode & 0o022 or before.st_size != self._identities[name][2]):
                         raise ProtocolError("INVALID_RUNTIME", "unsafe runtime source")
+                    snapshot = memory_file()
                     digest = hashlib.sha256()
-                    while block := os.read(source, 1024 * 1024):
+                    remaining = before.st_size
+                    while remaining:
                         check()
+                        block = os.read(source, min(remaining, 1024 * 1024))
+                        if not block:
+                            raise ProtocolError("INVALID_RUNTIME", "runtime source ended early")
                         digest.update(block)
+                        remaining -= len(block)
                         view = memoryview(block)
                         while view:
                             written = os.write(snapshot, view)
                             if written <= 0:
                                 raise ProtocolError("INVALID_RUNTIME", "runtime snapshot stalled")
                             view = view[written:]
-                    if digest.hexdigest() != expected:
+                    if digest.hexdigest() != expected or os.fstat(source).st_size != before.st_size:
                         raise ProtocolError("INVALID_RUNTIME", "runtime source digest mismatch")
                     os.fchmod(snapshot, 0o400 if name == "model.bin" else 0o500)
                     # Linux UAPI values; managed Python can also omit these
@@ -166,7 +183,8 @@ class InstalledRuntime:
                     descriptors[name] = reader
                 finally:
                     os.close(source)
-                    os.close(snapshot)
+                    if snapshot >= 0:
+                        os.close(snapshot)
             yield descriptors
         finally:
             os.close(root_fd)

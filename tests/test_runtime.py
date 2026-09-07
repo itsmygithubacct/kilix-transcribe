@@ -15,6 +15,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 import wave
 
 from kilix_transcribe.protocol import ProtocolError, receive_packet, send_packet
@@ -128,6 +129,33 @@ class RuntimeTests(unittest.TestCase):
         with self.assertRaises(ProtocolError):
             with runtime.snapshots():
                 self.fail("replaced runtime directory was accepted")
+
+    def test_runtime_fifo_and_growth_refuse_without_blocking(self):
+        runtime = self.runtime()
+        decoder = self.installation / "ffmpeg"
+        decoder.unlink()
+        os.mkfifo(decoder)
+        started = time.monotonic()
+        with self.assertRaises(ProtocolError):
+            with runtime.snapshots():
+                self.fail("FIFO accepted")
+        self.assertLess(time.monotonic() - started, 0.5)
+        decoder.unlink()
+        runtime = self.runtime()
+        with decoder.open("ab") as output:
+            output.write(b"unexpected growth")
+        with self.assertRaises(ProtocolError):
+            with runtime.snapshots():
+                self.fail("grown source accepted")
+
+    def test_snapshot_allocation_failure_closes_source_descriptor(self):
+        runtime = self.runtime()
+        before = len(list(Path("/proc/self/fd").iterdir()))
+        with patch("kilix_transcribe.runtime.memory_file", side_effect=OSError("allocation failed")):
+            with self.assertRaises(OSError):
+                with runtime.snapshots():
+                    self.fail("allocation failure accepted")
+        self.assertEqual(len(list(Path("/proc/self/fd").iterdir())), before)
 
     def test_session_escape_is_reaped_without_touching_unrelated_child(self):
         unrelated = subprocess.Popen([sys.executable, "-c", "import time;time.sleep(30)"])

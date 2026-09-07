@@ -269,6 +269,8 @@ def client_request(directory: Path, value: dict, descriptor: int | None = None) 
                         or event.get("request_id") != value["request_id"]
                         or event.get("job_id") != value.get("job_id")):
                     raise ProtocolError("INVALID_RESPONSE", "unbound provider response")
+                if type(event.get("type")) is not str:
+                    raise ProtocolError("INVALID_RESPONSE", "invalid event type")
                 if event.get("type") == "error":
                     error = event.get("error")
                     if type(error) is not dict or descriptors:

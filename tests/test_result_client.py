@@ -80,7 +80,8 @@ class ResultClientTests(unittest.TestCase):
             self.receive(json.dumps(self.document()).encode(), writable=True)
 
     def test_malformed_envelope_and_unbound_document_refuse(self):
-        for mutation in (lambda e: e.update(result=[]),
+        for mutation in (lambda e: e.update(type=[]), lambda e: e.update(type={}),
+                         lambda e: e.update(result=[]),
                          lambda e: e["result"]["transcript"].update(fd=False),
                          lambda e: e["result"].update(model_id="different"),
                          lambda e: e["result"].update(duration_ms=True)):
