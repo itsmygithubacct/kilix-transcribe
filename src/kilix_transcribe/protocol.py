@@ -356,6 +356,7 @@ def receive_packet(channel: socket.socket) -> tuple[dict[str, Any], tuple[int, .
         packet, ancillary, flags, _address = channel.recvmsg(
             MAX_CONTROL_FRAME_BYTES + _U32.size,
             socket.CMSG_SPACE(MAX_DESCRIPTORS * array.array("i").itemsize),
+            getattr(socket, "MSG_CMSG_CLOEXEC", 0),
         )
     except OSError as error:
         raise ProtocolError("TRANSPORT_ERROR", "control packet receive failed") from error

@@ -1,62 +1,76 @@
 # kilix-transcribe
 
-This repository contains the PREP7 design candidate and a CONT2 engine-neutral
-implementation surface for the reusable local speech-to-text provider planned
-by Plebian OS / Kilix 0.2.1.
+A local, reusable speech-to-text provider for Kilix. The current development
+runtime executes a pinned whisper.cpp CPU engine behind a private Unix socket.
+It accepts WAV, FLAC, and Ogg input, identifies language, supports transcription
+and English translation, and returns timed segments and words as text, JSON,
+WebVTT, or SRT. Voicebox consumes its transcript result descriptor without
+retaining a second copy.
 
-It is not yet an engine-backed provider. The accepted F104 P0 source population is
-represented exactly, while 0/4 engine routes, 0/8 source objects, and 0/1
-release profiles are selected. Selection remains a P2 result after the formal
-P1 contracts exist.
+## Run an explicitly staged development runtime
 
-The planned command population is 7/7:
-
-- `kilix-transcribe record`
-- `kilix-transcribe file`
-- `kilix-transcribe serve`
-- `kilix-transcribe models`
-- `kilix-transcribe status`
-- `kilix-transcribe cancel`
-- `kilix-transcribe unload`
-
-The output-mechanics population is 4/4: plain text, JSON, WebVTT, and SRT. VAD,
-language identification, word timestamps, optional supported translation, and
-explicit-session diarization are retained requirements rather than silently
-deferred features.
-
-The pure-Python candidate under `src/kilix_transcribe/` implements only the
-pieces that do not need a selected engine or frozen shared contract:
-
-- bounded word and segment values with unstable-to-stable replacement rules;
-- deterministic final-result serialization to all 4/4 output formats;
-- a 6/6-state job lifecycle that commits at most 1/1 terminal result; and
-- bounded candidate JSON framing, exact request types, kernel peer-UID checks,
-  and 1/1 `SCM_RIGHTS` audio descriptor transport over Unix seqpacket sockets;
-- private atomic transcript commits beneath provider-owned result names; and
-- static `models` and `status` inspection with 0/4 routes, 0/8 source objects,
-  and 0/1 release profiles selected.
-
-All 5/5 operational commands fail closed with exit status 69 and the exact
-provider refusal:
-
-```text
-KILIX_TRANSCRIBE_REFUSAL [RUNTIME_UNSELECTED] no transcription runtime or release profile is selected
-```
-
-Run the complete candidate check with:
+The provider does not download code or models. Stage the three reviewed inputs
+in a new private directory, using their independently verified SHA-256 values:
 
 ```sh
-make check
+python3 tools/stage_runtime.py \
+  --destination "$XDG_DATA_HOME/kilix-transcribe/runtime" \
+  --engine /path/to/whisper-cli --engine-sha256 <sha256> \
+  --decoder /path/to/ffmpeg --decoder-sha256 <sha256> \
+  --model /path/to/ggml-model.bin --model-sha256 <sha256> \
+  --model-id whisper-tiny --model-revision <exact-revision>
+PYTHONPATH=src python3 -m kilix_transcribe serve \
+  --runtime-root "$XDG_DATA_HOME/kilix-transcribe/runtime"
 ```
 
-The check validates the exact values of the 48/48 requirement ledger and 8/8
-accepted P0 source objects, 4/4 unselected architecture routes, 7/7 commands,
-4/4 outputs, 11/11 committed checker negative controls, and 64/64 discovered
-unit tests
-using only Python's standard library.
+Build `whisper-cli` from whisper.cpp commit
+`371b5a7561823ab2bb32142d2751e35e7534727b`, with CPU support and
+`GGML_NATIVE=OFF`, `GGML_CUDA=OFF`, and `BUILD_SHARED_LIBS=OFF`. The staging
+command binds supplied bytes; it cannot certify how an executable was built.
+The decoder's shared-library closure remains an installation responsibility.
+`XDG_RUNTIME_DIR` must name a private, owned directory. The service creates
+`kilix-transcribe.sock` with mode 0600 and checks the connecting peer's UID.
 
-The executable design ledger is
-[`design/transcribe-candidate-v1.json`](design/transcribe-candidate-v1.json).
-The implementation surface is explicitly a candidate internal API, not the P1
-wire/catalog freeze. No engine source, model, audio, runtime, F100 record, F106
-profile, package, remote, or release pin is included.
+From another process with the same runtime directory:
+
+```sh
+PYTHONPATH=src python3 -m kilix_transcribe file input.wav --format srt
+PYTHONPATH=src python3 -m kilix_transcribe file input.flac --task translate
+PYTHONPATH=src python3 -m kilix_transcribe models
+PYTHONPATH=src python3 -m kilix_transcribe status
+PYTHONPATH=src python3 -m kilix_transcribe cancel <job-id>
+PYTHONPATH=src python3 -m kilix_transcribe unload
+```
+
+Jobs run in a supervised process group. A deadline, client disconnect, service
+shutdown, or cancellation stops and reaps the worker and decoder/engine
+children. Temporary audio and transcripts are removed by the supervisor.
+Each job loads its model; `unload` confirms there is no persistent model and
+refuses while a worker is active. There is one active job and a bounded number
+of connections. Additional jobs receive `BUSY`.
+
+Inputs are copied from one read-only descriptor after size and SHA-256 checks.
+Jobs cannot supply paths, executable names, model locations, or URLs. Result
+JSON travels through one read-only descriptor with size and SHA-256 metadata,
+up to 16 MiB, while the control message limit remains 64 KiB. The service and
+worker do not log input audio or transcripts.
+
+## Candidate boundaries
+
+This is a working development runtime, **not a qualified release profile**.
+Its digest-bound `kilix.transcribe.runtime/v1` manifest is not an F100 install
+authority or license receipt. Model/source selection for release, F100/F106
+binding, resource admission, GPU profiles, corpus accuracy comparisons,
+streaming recognition, microphone recording, VAD, diarization and the required
+soak remain open. Unsupported diarization refuses explicitly. Commands that
+need an unstaged runtime retain `RUNTIME_UNSELECTED` and exit 69.
+
+The existing design ledger in `design/transcribe-candidate-v1.json` preserves
+48 requirements, eight accepted source candidates and four unselected release
+routes. Its unselected state describes qualification, not the presence of the
+new development CPU path. No model weights, runtime executables, audio,
+license receipts or release pins are included.
+
+Run `make check` for the design/interface controls and unit tests. Process
+supervision tests use explicit fake tools; passing them is not model-quality
+or hardware-profile acceptance.
