@@ -54,7 +54,7 @@ def main() -> None:
     resource.setrlimit(resource.RLIMIT_NOFILE, (64, 64))
     os.umask(0o077)
     request = json.loads(sys.stdin.buffer.read(65_537))
-    root = Path(request["runtime"])
+    runtime_fds = request["runtime_fds"]
     args = request["args"]
     audio_fd = request["audio_fd"]
     manifest = request["manifest"]
@@ -63,11 +63,12 @@ def main() -> None:
     with nullcontext(request["workspace"]) as temporary:
         directory = Path(temporary)
         decoded = directory / "audio.wav"
-        _run([str(root / "ffmpeg"), "-nostdin", "-v", "error", "-protocol_whitelist", "file,pipe",
+        decoder_fd = runtime_fds["ffmpeg"]
+        _run([f"/proc/self/fd/{decoder_fd}", "-nostdin", "-v", "error", "-protocol_whitelist", "file,pipe",
               "-f", demuxer, "-i", f"/proc/self/fd/{audio_fd}", "-map", "0:a:0",
               "-vn", "-sn", "-dn", "-t", str(MAX_AUDIO_SECONDS + 1), "-ac", "1",
               "-ar", "16000", "-c:a", "pcm_s16le", "-f", "wav", str(decoded)],
-             pass_fds=(audio_fd,))
+             pass_fds=(audio_fd, decoder_fd))
         os.close(audio_fd)
         with wave.open(str(decoded), "rb") as audio:
             frames = audio.getnframes()
@@ -84,13 +85,14 @@ def main() -> None:
         language = args.get("language") or "auto"
         if not silence:
             destination = directory / "transcript"
-            command = [str(root / "whisper-cli"), "--model", str(root / "model.bin"),
+            engine_fd, model_fd = runtime_fds["whisper-cli"], runtime_fds["model.bin"]
+            command = [f"/proc/self/fd/{engine_fd}", "--model", f"/proc/self/fd/{model_fd}",
                        "--file", str(decoded), "--language", language.split("-")[0],
                        "--output-json-full", "--output-file", str(destination),
                        "--threads", "2", "--no-gpu", "--print-progress"]
             if args["task"] == "translate":
                 command.append("--translate")
-            _run(command)
+            _run(command, pass_fds=(engine_fd, model_fd))
             payload = destination.with_suffix(".json").read_bytes()
             if len(payload) > MAX_RESULT_BYTES:
                 raise ValueError("engine result exceeds bound")

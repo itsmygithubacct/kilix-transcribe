@@ -20,6 +20,7 @@ from .protocol import (
     require_same_uid_peer, send_packet, verify_request_descriptors,
 )
 from .runtime import InstalledRuntime, MAX_INPUT_BYTES, MAX_RESULT_BYTES, private_directory, run_job
+from .results import decode_result
 
 SOCKET_NAME = "kilix-transcribe.sock"
 
@@ -204,6 +205,7 @@ class Service:
                         metadata = {"transcript": {"fd": 0, "byte_length": len(payload),
                                                    "sha256": hashlib.sha256(payload).hexdigest()},
                                     "engine_id": "whisper.cpp", "model_id": self.runtime.model_id,
+                                    "engine_revision": self.runtime.manifest["engine_revision"],
                                     "model_revision": self.runtime.model_revision,
                                     "duration_ms": result["duration_ms"]}
                         send_packet(channel, _reply(request, "result", metadata), result_fd)
@@ -268,7 +270,10 @@ def client_request(directory: Path, value: dict, descriptor: int | None = None) 
                         or event.get("job_id") != value.get("job_id")):
                     raise ProtocolError("INVALID_RESPONSE", "unbound provider response")
                 if event.get("type") == "error":
-                    code = event.get("error", {}).get("code", "PROVIDER_ERROR")
+                    error = event.get("error")
+                    if type(error) is not dict or descriptors:
+                        raise ProtocolError("INVALID_RESPONSE", "invalid error response")
+                    code = error.get("code", "PROVIDER_ERROR")
                     if (type(code) is not str or not 0 < len(code) <= 64
                             or any(c not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_" for c in code)):
                         code = "PROVIDER_ERROR"
@@ -277,23 +282,32 @@ def client_request(directory: Path, value: dict, descriptor: int | None = None) 
                     if descriptors:
                         raise ProtocolError("DESCRIPTOR_MISMATCH", "unexpected progress descriptor")
                     continue
-                result = event["result"]
+                result = event.get("result")
+                if type(result) is not dict:
+                    raise ProtocolError("INVALID_RESPONSE", "invalid result envelope")
                 if event.get("type") == "result":
-                    metadata = result["transcript"]
+                    if set(result) != {"transcript", "engine_id", "engine_revision", "model_id", "model_revision", "duration_ms"}:
+                        raise ProtocolError("INVALID_RESPONSE", "invalid result metadata population")
+                    metadata = result.get("transcript")
                     if (len(descriptors) != 1 or type(metadata) is not dict
-                            or metadata.get("fd") != 0
+                            or set(metadata) != {"fd", "byte_length", "sha256"}
+                            or type(metadata.get("fd")) is not int or metadata["fd"] != 0
                             or type(metadata.get("byte_length")) is not int
-                            or not 0 < metadata["byte_length"] <= MAX_RESULT_BYTES):
+                            or not 0 < metadata["byte_length"] <= MAX_RESULT_BYTES
+                            or type(metadata.get("sha256")) is not str
+                            or len(metadata["sha256"]) != 64
+                            or any(c not in "0123456789abcdef" for c in metadata["sha256"])):
                         raise ProtocolError("DESCRIPTOR_MISMATCH", "invalid transcript descriptor")
                     fd = descriptors[0]
                     info = os.fstat(fd)
                     if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
-                            or info.st_size != metadata["byte_length"]):
+                            or info.st_size != metadata["byte_length"]
+                            or fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_ACCMODE != os.O_RDONLY):
                         raise ProtocolError("DESCRIPTOR_MISMATCH", "invalid transcript file")
                     payload = os.pread(fd, MAX_RESULT_BYTES + 1, 0)
                     if len(payload) != info.st_size or hashlib.sha256(payload).hexdigest() != metadata["sha256"]:
                         raise ProtocolError("DESCRIPTOR_MISMATCH", "transcript digest mismatch")
-                    return json.loads(payload)
+                    return decode_result(payload, result, value["args"])
                 if descriptors or event.get("type") not in {"hello", "status", "models", "unloaded", "canceled"}:
                     raise ProtocolError("INVALID_RESPONSE", "unexpected provider response")
                 return result

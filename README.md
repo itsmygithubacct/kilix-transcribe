@@ -42,15 +42,19 @@ PYTHONPATH=src python3 -m kilix_transcribe cancel <job-id>
 PYTHONPATH=src python3 -m kilix_transcribe unload
 ```
 
-Jobs run in a supervised process group. A deadline, client disconnect, service
-shutdown, or cancellation stops and reaps the worker and decoder/engine
-children. Temporary audio and transcripts are removed by the supervisor.
+Each job has a dedicated Linux descendant supervisor. A deadline, client
+disconnect, service shutdown, or cancellation stops and reaps the worker and
+decoder/engine children, including children that create another session. Temporary audio and transcripts are removed by the supervisor.
 Each job loads its model; `unload` confirms there is no persistent model and
 refuses while a worker is active. There is one active job and a bounded number
 of connections. Additional jobs receive `BUSY`.
 
 Inputs are copied from one read-only descriptor after size and SHA-256 checks.
-Jobs cannot supply paths, executable names, model locations, or URLs. Result
+Jobs cannot supply paths, executable names, model locations, or URLs. Engines
+and model bytes are copied into verified, sealed memory files and executed/read
+through inherited descriptors; a later installation-path replacement cannot
+substitute bytes. Runtime ancestor identities are checked without following
+symlinks. Result
 JSON travels through one read-only descriptor with size and SHA-256 metadata,
 up to 16 MiB, while the control message limit remains 64 KiB. The service and
 worker do not log input audio or transcripts.

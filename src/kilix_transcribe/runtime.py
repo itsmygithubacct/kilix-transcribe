@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import hashlib
 import ctypes
+from contextlib import contextmanager
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -29,6 +31,19 @@ ENGINE_COMMIT = "371b5a7561823ab2bb32142d2751e35e7534727b"
 MAX_INPUT_BYTES = 512 * 1024 * 1024
 MAX_RESULT_BYTES = 16 * 1024 * 1024
 MAX_AUDIO_SECONDS = 3600
+
+
+def memory_file() -> int:
+    # Some managed CPython builds omit os.memfd_create even on a supporting
+    # Linux/glibc host. Use the same libc operation, never a writable fallback.
+    libc = ctypes.CDLL(None, use_errno=True)
+    create = libc.memfd_create
+    create.argtypes = (ctypes.c_char_p, ctypes.c_uint)
+    create.restype = ctypes.c_int
+    descriptor = create(b"kilix-runtime", 0x0001 | 0x0002)
+    if descriptor < 0:
+        raise ProtocolError("INVALID_RUNTIME", "sealed runtime snapshots are unavailable")
+    return descriptor
 
 
 def digest_file(path: Path) -> str:
@@ -54,6 +69,8 @@ def private_directory(path: Path, *, create: bool = False) -> Path:
 class InstalledRuntime:
     def __init__(self, root: Path):
         self.root = private_directory(root)
+        root_fd, self._directories = self._open_root()
+        os.close(root_fd)
         manifest = root / "runtime.json"
         info = manifest.lstat()
         if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
@@ -96,6 +113,66 @@ class InstalledRuntime:
         return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns,
                 info.st_ctime_ns, info.st_mode)
 
+    def _open_root(self):
+        descriptor = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        identities = []
+        try:
+            for component in self.root.parts[1:]:
+                child = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                dir_fd=descriptor)
+                os.close(descriptor)
+                descriptor = child
+                info = os.fstat(descriptor)
+                identities.append((info.st_dev, info.st_ino, info.st_mode, info.st_uid))
+            return descriptor, identities
+        except BaseException:
+            os.close(descriptor)
+            raise
+
+    @contextmanager
+    def snapshots(self, check: Callable[[], None] = lambda: None):
+        """Carry verified, sealed bytes through execution; never reopen paths."""
+        root_fd, directories = self._open_root()
+        descriptors = {}
+        try:
+            if directories != self._directories:
+                raise ProtocolError("INVALID_RUNTIME", "runtime directory identity changed")
+            for name, expected in self.manifest["files"].items():
+                check()
+                source = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=root_fd)
+                snapshot = memory_file()
+                try:
+                    before = os.fstat(source)
+                    if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.geteuid()
+                            or before.st_mode & 0o022):
+                        raise ProtocolError("INVALID_RUNTIME", "unsafe runtime source")
+                    digest = hashlib.sha256()
+                    while block := os.read(source, 1024 * 1024):
+                        check()
+                        digest.update(block)
+                        view = memoryview(block)
+                        while view:
+                            written = os.write(snapshot, view)
+                            if written <= 0:
+                                raise ProtocolError("INVALID_RUNTIME", "runtime snapshot stalled")
+                            view = view[written:]
+                    if digest.hexdigest() != expected:
+                        raise ProtocolError("INVALID_RUNTIME", "runtime source digest mismatch")
+                    os.fchmod(snapshot, 0o400 if name == "model.bin" else 0o500)
+                    # Linux UAPI values; managed Python can also omit these
+                    # fcntl names. F_ADD_SEALS=1024+9, WRITE|GROW|SHRINK|SEAL.
+                    fcntl.fcntl(snapshot, 1033, 0x0008 | 0x0004 | 0x0002 | 0x0001)
+                    reader = os.open(f"/proc/self/fd/{snapshot}", os.O_RDONLY | os.O_CLOEXEC)
+                    descriptors[name] = reader
+                finally:
+                    os.close(source)
+                    os.close(snapshot)
+            yield descriptors
+        finally:
+            os.close(root_fd)
+            for descriptor in descriptors.values():
+                os.close(descriptor)
+
     def verify_unchanged(self) -> None:
         for name, identity in self._identities.items():
             path = self.root / name
@@ -113,33 +190,15 @@ class InstalledRuntime:
 
 
 def stop_process(process: subprocess.Popen) -> None:
-    """Reap the whole worker group before acknowledging cancellation."""
+    """Wait for the dedicated supervisor to reap every owned descendant."""
+    if process.poll() is None:
+        process.terminate()
     try:
-        os.killpg(process.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        pass
-    try:
-        process.wait(timeout=0.5)
-    except subprocess.TimeoutExpired:
-        pass
-    # A worker can exit before one of its descendants. Always kill the group.
-    try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    process.wait()
-    # Linux reparents orphaned grandchildren to this service, so a canceled
-    # worker cannot leave engine zombies with an unrelated init process.
-    deadline = time.monotonic() + 2
-    while True:
-        try:
-            reaped, _ = os.waitpid(-process.pid, os.WNOHANG)
-        except ChildProcessError:
-            break
-        if reaped == 0:
-            if time.monotonic() >= deadline:
-                raise ProtocolError("SUPERVISOR_FAILED", "worker group did not terminate")
-            time.sleep(0.005)
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired as error:
+        process.kill()
+        process.wait()
+        raise ProtocolError("SUPERVISOR_FAILED", "descendant cleanup did not complete") from error
 
 
 def run_job(runtime: InstalledRuntime, audio_fd: int, args: dict, *,
@@ -150,27 +209,28 @@ def run_job(runtime: InstalledRuntime, audio_fd: int, args: dict, *,
     if time.monotonic() >= deadline:
         raise ProtocolError("DEADLINE_EXCEEDED", "job deadline exceeded")
     runtime.verify_unchanged()
-    # PR_SET_CHILD_SUBREAPER is Linux's process-tree ownership mechanism.
-    libc = ctypes.CDLL(None, use_errno=True)
-    if libc.prctl(36, 1, 0, 0, 0) != 0:
-        raise ProtocolError("SUPERVISOR_FAILED", "cannot own worker descendants")
+    def check():
+        if cancel.is_set() or disconnected():
+            raise ProtocolError("CANCELED", "job canceled")
+        if time.monotonic() >= deadline:
+            raise ProtocolError("DEADLINE_EXCEEDED", "job deadline exceeded")
     if args["task"] == "diarize":
         raise ProtocolError("UNSUPPORTED_CAPABILITY", "no diarization profile is installed")
     if not 0 < os.fstat(audio_fd).st_size <= MAX_INPUT_BYTES:
         raise ProtocolError("LIMIT_EXCEEDED", "audio exceeds the runtime input bound")
     # File descriptors carry audio; the isolated worker's argv carries no text,
     # transcript, source filename, or model paths supplied by a client.
-    worker = Path(__file__).with_name("worker.py")
+    worker = Path(__file__).with_name("supervisor.py")
     environment = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8",
                    "OMP_NUM_THREADS": "2", "OPENBLAS_NUM_THREADS": "2"}
-    with tempfile.TemporaryDirectory(prefix="kilix-transcribe-job-") as workspace, tempfile.TemporaryFile() as output:
-        job = {"runtime": str(runtime.root), "manifest": runtime.manifest,
+    with runtime.snapshots(check) as runtime_fds, tempfile.TemporaryDirectory(prefix="kilix-transcribe-job-") as workspace, tempfile.TemporaryFile() as output:
+        job = {"runtime_fds": runtime_fds, "manifest": runtime.manifest,
                "audio_fd": audio_fd, "args": args,
                "workspace": workspace}
         process = subprocess.Popen(
             [sys.executable, "-I", str(worker)], stdin=subprocess.PIPE,
             stdout=output, stderr=subprocess.DEVNULL, env=environment,
-            pass_fds=(audio_fd,), start_new_session=True,
+            pass_fds=(audio_fd, *runtime_fds.values()), start_new_session=True,
         )
         try:
             assert process.stdin is not None

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -27,11 +28,15 @@ shutil.copyfile(sys.argv[sys.argv.index('-i')+1],sys.argv[-1])
 """
 ENGINE = """#!/usr/bin/python3
 import json, os, pathlib, signal, subprocess, sys, time
-root=pathlib.Path(sys.argv[0]).parent
-mode=(root/'model.bin').read_text()
+root=pathlib.Path(FIXTURE_ROOT)
+mode=pathlib.Path(sys.argv[sys.argv.index('--model')+1]).read_text()
 (root/'engine.pid').write_text(str(os.getpid()))
 if mode=='sleep':
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    time.sleep(120)
+if mode=='escape':
+    child=subprocess.Popen(['/usr/bin/python3','-c','import signal,time;signal.signal(signal.SIGTERM,signal.SIG_IGN);time.sleep(120)'],start_new_session=True)
+    (root/'escaped.pid').write_text(str(child.pid))
     time.sleep(120)
 if mode=='fail':
     raise SystemExit(3)
@@ -66,7 +71,7 @@ class RuntimeTests(unittest.TestCase):
     def runtime(self, mode="success"):
         for name, source in (("ffmpeg", DECODER), ("whisper-cli", ENGINE), ("model.bin", mode)):
             path = self.installation / name
-            path.write_text(source)
+            path.write_text(source.replace("FIXTURE_ROOT", repr(str(self.installation))))
             path.chmod(0o600 if name == "model.bin" else 0o700)
         manifest = {"schema": "kilix.transcribe.runtime/v1", "engine_revision": ENGINE_COMMIT,
                     "model": {"id": "test-model", "revision": "test-revision"},
@@ -95,6 +100,60 @@ class RuntimeTests(unittest.TestCase):
         marker.write_text("existing runtime")
         self.assertNotEqual(subprocess.run(command, capture_output=True).returncode, 0)
         self.assertEqual(marker.read_text(), "existing runtime")
+
+    def test_verified_snapshots_survive_later_engine_and_model_replacement(self):
+        from kilix_transcribe.runtime import run_job
+        runtime = self.runtime()
+        original = runtime.snapshots
+        @contextmanager
+        def replace_after_snapshot(check):
+            with original(check) as descriptors:
+                (self.installation / "whisper-cli").write_text("unverified engine")
+                (self.installation / "model.bin").write_text("unverified model")
+                for fd in descriptors.values():
+                    with self.assertRaises(OSError):
+                        os.write(fd, b"mutate")
+                yield descriptors
+        runtime.snapshots = replace_after_snapshot
+        with self.audio.open("rb") as source:
+            result = run_job(runtime, source.fileno(), self.value()["args"],
+                             deadline=time.monotonic() + 3, cancel=threading.Event())
+        self.assertIn("Test transcript", result["text"])
+
+    def test_changed_runtime_ancestor_is_refused(self):
+        runtime = self.runtime()
+        old = self.installation.with_name("old-installation")
+        self.installation.rename(old)
+        self.installation.mkdir(mode=0o700)
+        with self.assertRaises(ProtocolError):
+            with runtime.snapshots():
+                self.fail("replaced runtime directory was accepted")
+
+    def test_session_escape_is_reaped_without_touching_unrelated_child(self):
+        unrelated = subprocess.Popen([sys.executable, "-c", "import time;time.sleep(30)"])
+        self.addCleanup(lambda: (unrelated.kill() if unrelated.poll() is None else None, unrelated.wait()))
+        self.start("escape")
+        errors = []
+        def invoke():
+            try:
+                self.submit()
+            except ProtocolError as error:
+                errors.append(error.code)
+        thread = threading.Thread(target=invoke)
+        thread.start()
+        marker = self.installation / "escaped.pid"
+        deadline = time.monotonic() + 3
+        while not marker.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertTrue(marker.exists())
+        pid = int(marker.read_text())
+        client_request(self.ipc, request_value("cancel", job_id="test-job"))
+        thread.join(3)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, ["CANCELED"])
+        with self.assertRaises(ProcessLookupError):
+            os.kill(pid, 0)
+        self.assertIsNone(unrelated.poll())
 
     def start(self, mode="success"):
         self.service = Service(self.runtime(mode), self.ipc)
