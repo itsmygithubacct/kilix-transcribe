@@ -91,6 +91,7 @@ class RuntimeTests(unittest.TestCase):
         resume_new = threading.Event()
         new_running = threading.Event()
         old_threads = []
+        old_paused = threading.Event()
         calls = 0
         def run(*args, **kwargs):
             nonlocal calls
@@ -103,6 +104,7 @@ class RuntimeTests(unittest.TestCase):
             original_send(channel, value, descriptor)
             if value.get('job_id') == 'reused-id' and value['type'] == 'result' and not old_threads:
                 old_threads.append(threading.current_thread())
+                old_paused.set()
                 resume_old.wait(5)
         with patch.object(service_module, 'send_packet', side_effect=send), \
              patch.object(service_module, 'run_job', side_effect=run), \
@@ -111,6 +113,7 @@ class RuntimeTests(unittest.TestCase):
             request = request_value('submit', job_id='reused-id', args=self.value()["args"], timeout=5)
             try:
                 client_request(self.ipc, request, audio.fileno())
+                self.assertTrue(old_paused.wait(2))
                 future = pool.submit(client_request, self.ipc, request, audio.fileno())
                 self.assertTrue(new_running.wait(2))
                 resume_old.set()
