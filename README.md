@@ -64,9 +64,10 @@ worker do not log input audio or transcripts.
 This is a working development runtime, **not a qualified release profile**.
 Its digest-bound `kilix.transcribe.runtime/v1` manifest is not an F100 install
 authority or license receipt. Production asset admission, F106 binding,
-resource admission, GPU profiles, corpus accuracy comparisons,
-streaming recognition, microphone recording, VAD, diarization and the required
-soak remain open. Unsupported diarization refuses explicitly. Commands that
+resource admission, GPU profiles, combined corpus/soak qualification,
+streaming recognition, neural VAD and diarization remain open. The managed
+recording and optional legacy energy detector below are development paths.
+Unsupported diarization refuses explicitly. Commands that
 need an unstaged runtime retain `RUNTIME_UNSELECTED` and exit 69.
 
 The existing design ledger in `design/transcribe-candidate-v1.json` preserves
@@ -159,3 +160,45 @@ setuptools 78.1.0 and wheel 0.45.1; the provider itself uses the standard librar
 Engine executables, model bytes, optional `kilix-content` authority and shared
 `kilix-voice` coordination are installed and selected separately. Building a
 wheel supplies neither a model download nor a source-license grant.
+
+### Managed microphone recording
+
+With the managed `kilix-voice` microphone API installed and the transcription
+service ready, explicitly record one bounded clip:
+
+```sh
+kilix-transcribe record --seconds 30 --format text
+kilix-transcribe record --seconds 60 --vad --task translate --format srt
+```
+
+`--seconds` selects 1 to 120 seconds; `--timeout` covers recording and recognition
+and must allow additional recognition time. `--device` selects a validated
+PulseAudio source token. `--vad` uses the existing voice energy detector to end
+after speech and trailing silence. It keeps the original captured samples; it
+does not select Silero or establish recognition/silence quality. A bare `record`
+retains the unselected introspection surface and opens no microphone.
+
+The CLI prints microphone ownership phases to stderr. Recording is indicated
+before the helper opens audio; `inactive` requires proved descendant cleanup.
+An unresolved helper/supervisor remains `unavailable` and its shared microphone
+grant stays quarantined. Ctrl-C, termination, a departed output receiver,
+provider failure, unknown/locked logind state or the absolute capture limit
+stop recording. The normal duration limit submits the clip only after cleanup;
+cancellation, lost frames, helper errors and unproved cleanup never submit it.
+
+Capture uses the same per-user microphone namespace as other cooperating voice
+clients, and keeps bounded mono16k PCM in memory. Recognition begins after all
+recorder descendants are proved reaped. Its read-only WAV descriptor goes
+through the existing provider byte checks. No raw recording or transcript is
+persisted by default, and the CLI never types keys or Enter. Cancel during
+recognition sends the exact job ID and awaits the original terminal response
+within a bounded cleanup window; failure to receive that proof closes the
+connection and cannot return a transcript.
+
+Embedders use `recording.capture_wav` with a required visible `indicator`
+callback and bounded cancellation/disconnect/lock authorities, or
+`recording.record_and_transcribe` for the combined flow. Recorder command
+configuration and private test namespaces are local embedding controls, never
+accepted from provider IPC. The optional Python API must be installed; missing
+managed microphone support refuses instead of opening an unmanaged device.
+Synthetic recorder/ASR tests exercise these boundaries without physical capture.

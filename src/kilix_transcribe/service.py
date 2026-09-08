@@ -275,7 +275,15 @@ def request_value(operation: str, *, job_id: str | None = None,
     return value
 
 
-def client_request(directory: Path, value: dict, descriptor: int | None = None) -> dict:
+def client_request(directory: Path, value: dict, descriptor: int | None = None, *, cancelled=None) -> dict:
+    if cancelled is not None and (not callable(cancelled) or value.get("op") != "submit"):
+        raise ProtocolError("INVALID_REQUEST", "cancellation callback requires a submit request")
+    if cancelled is not None:
+        decision = cancelled()
+        if type(decision) is not bool:
+            raise ProtocolError("INVALID_REQUEST", "cancellation callback must return boolean")
+        if decision:
+            raise ProtocolError("CANCELED", "job canceled before submission")
     private_directory(directory)
     path = directory / SOCKET_NAME
     info = path.lstat()
@@ -287,10 +295,29 @@ def client_request(directory: Path, value: dict, descriptor: int | None = None) 
         channel.connect(str(path))
         require_same_uid_peer(channel)
         send_packet(channel, value, descriptor)
+        cancel_sent = False
         for _ in range(256):
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise ProtocolError("DEADLINE_EXCEEDED", "provider deadline exceeded")
+            if cancelled is not None:
+                while True:
+                    if not cancel_sent:
+                        decision = cancelled()
+                        if type(decision) is not bool:
+                            raise ProtocolError("INVALID_REQUEST", "cancellation callback must return boolean")
+                        if decision:
+                            # Cancel only this job and keep its original channel
+                            # open for the post-reap terminal acknowledgement.
+                            client_request(directory, request_value("cancel", job_id=value["job_id"],
+                                           timeout=min(1, max(0.001, remaining))))
+                            cancel_sent = True
+                            deadline = min(deadline, time.monotonic() + 6)
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise ProtocolError("DEADLINE_EXCEEDED", "provider cancellation deadline exceeded")
+                    if select.select([channel], [], [], min(0.05, remaining))[0]:
+                        break
             channel.settimeout(remaining)
             event, descriptors = receive_packet(channel)
             try:
@@ -310,13 +337,15 @@ def client_request(directory: Path, value: dict, descriptor: int | None = None) 
                         code = "PROVIDER_ERROR"
                     raise ProtocolError(code, "provider refused the request")
                 if event.get("type") in {"accepted", "queued", "loading", "progress"}:
-                    if descriptors:
+                    if descriptors or value["op"] != "submit":
                         raise ProtocolError("DESCRIPTOR_MISMATCH", "unexpected progress descriptor")
                     continue
                 result = event.get("result")
                 if type(result) is not dict:
                     raise ProtocolError("INVALID_RESPONSE", "invalid result envelope")
                 if event.get("type") == "result":
+                    if value["op"] != "submit":
+                        raise ProtocolError("INVALID_RESPONSE", "unexpected transcript result")
                     if set(result) != {"transcript", "engine_id", "engine_revision", "model_id", "model_revision", "duration_ms"}:
                         raise ProtocolError("INVALID_RESPONSE", "invalid result metadata population")
                     metadata = result.get("transcript")
@@ -338,8 +367,13 @@ def client_request(directory: Path, value: dict, descriptor: int | None = None) 
                     payload = os.pread(fd, MAX_RESULT_BYTES + 1, 0)
                     if len(payload) != info.st_size or hashlib.sha256(payload).hexdigest() != metadata["sha256"]:
                         raise ProtocolError("DESCRIPTOR_MISMATCH", "transcript digest mismatch")
-                    return decode_result(payload, result, value["args"])
-                if descriptors or event.get("type") not in {"hello", "status", "models", "unloaded", "canceled"}:
+                    decoded = decode_result(payload, result, value["args"])
+                    if cancel_sent:
+                        raise ProtocolError("CANCELED", "job canceled before delivery")
+                    return decoded
+                expected = {"hello": "hello", "status": "status", "models": "models",
+                            "unload": "unloaded", "cancel": "canceled"}.get(value["op"])
+                if descriptors or event.get("type") != expected:
                     raise ProtocolError("INVALID_RESPONSE", "unexpected provider response")
                 return result
             finally:

@@ -29,8 +29,15 @@ def parser() -> argparse.ArgumentParser:
             subparser.add_argument("--model-snapshot-bytes", type=int)
             subparser.add_argument("--lease-device")
             subparser.add_argument("--lease-namespace")
-        elif command == "file":
-            subparser.add_argument("input", type=Path, nargs="?")
+        elif command in {"file", "record"}:
+            if command == "file":
+                subparser.add_argument("input", type=Path, nargs="?")
+            else:
+                subparser.add_argument("--seconds", type=float,
+                                       help="explicitly record for at most 1 to 120 seconds")
+                subparser.add_argument("--device", default="default")
+                subparser.add_argument("--vad", action="store_true",
+                                       help="end after speech and trailing silence using the legacy energy detector")
             subparser.add_argument("--format", choices=("text", "json", "webvtt", "srt"), default="text")
             subparser.add_argument("--language")
             subparser.add_argument("--task", choices=("transcribe", "translate", "diarize"), default="transcribe")
@@ -61,8 +68,30 @@ def main(argv: Sequence[str] | None = None) -> int:
                     signal.signal(sig, lambda _sig, _frame: service.stop())
                 service.serve()
             return 0
+        if arguments.command == "record" and arguments.seconds is not None:
+            import threading
+            from .recording import record_and_transcribe, receiver_closed
+            cancellation = threading.Event()
+            previous = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+            for sig in previous:
+                signal.signal(sig, lambda _sig, _frame: cancellation.set())
+            indication_lock = threading.Lock()
+            def indicate(phase):
+                with indication_lock:
+                    print("KILIX_MICROPHONE " + phase, file=sys.stderr, flush=True)
+            try:
+                payload = record_and_transcribe(runtime_directory(), seconds=arguments.seconds,
+                    indicator=indicate, task=arguments.task, language=arguments.language,
+                    output=arguments.format, timeout=arguments.timeout, cancelled=cancellation.is_set,
+                    disconnected=lambda: receiver_closed(sys.stdout.fileno()), vad=arguments.vad,
+                    config={"audio": {"device_in": arguments.device}})
+                print(payload["output"], end="")
+            finally:
+                for sig, handler in previous.items():
+                    signal.signal(sig, handler)
+            return 0
         if arguments.command == "file" and arguments.input is not None:
-            descriptor = os.open(arguments.input, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            descriptor = os.open(arguments.input, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC)
             try:
                 info = os.fstat(descriptor)
                 import stat
