@@ -159,7 +159,9 @@ The wheel contains the provider package only. Its build tools are pinned to
 setuptools 78.1.0 and wheel 0.45.1; the provider itself uses the standard library.
 Engine executables, model bytes, optional `kilix-content` authority and shared
 `kilix-voice` coordination are installed and selected separately. Building a
-wheel supplies neither a model download nor a source-license grant.
+wheel supplies no model download. This wrapper source is licensed under MIT;
+see [LICENSE](LICENSE). Upstream engines, dependencies and models retain
+their separate terms.
 
 ### Managed microphone recording
 
