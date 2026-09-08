@@ -27,6 +27,8 @@ def parser() -> argparse.ArgumentParser:
             subparser.add_argument("--installed-asset")
             subparser.add_argument("--content-root", type=Path)
             subparser.add_argument("--model-snapshot-bytes", type=int)
+            subparser.add_argument("--lease-device")
+            subparser.add_argument("--lease-namespace")
         elif command == "file":
             subparser.add_argument("input", type=Path, nargs="?")
             subparser.add_argument("--format", choices=("text", "json", "webvtt", "srt"), default="text")
@@ -43,6 +45,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         from .runtime import InstalledRuntime, MAX_INPUT_BYTES
         from .service import Service, client_request, request_value, runtime_directory
+        if arguments.command == "serve":
+            from .owned import from_options as execution_options
+            execution_policy = execution_options(arguments)
 
         if arguments.command == "serve":
             from .content import from_options
@@ -50,7 +55,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                                         consumer_schema="kilix.transcribe.runtime")
         if arguments.command == "serve" and arguments.runtime_root is not None:
             with model_source if model_source is not None else nullcontext():
-                service = Service(InstalledRuntime(arguments.runtime_root, model_source=model_source), runtime_directory())
+                service = Service(InstalledRuntime(arguments.runtime_root, model_source=model_source), runtime_directory(),
+                                  execution_policy=execution_policy)
                 for sig in (signal.SIGINT, signal.SIGTERM):
                     signal.signal(sig, lambda _sig, _frame: service.stop())
                 service.serve()

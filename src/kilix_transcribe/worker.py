@@ -55,6 +55,7 @@ def main() -> None:
     os.umask(0o077)
     request = json.loads(sys.stdin.buffer.read(65_537))
     runtime_fds = request["runtime_fds"]
+    guard = () if request.get("_lease_guard_fd") is None else (request["_lease_guard_fd"],)
     args = request["args"]
     audio_fd = request["audio_fd"]
     manifest = request["manifest"]
@@ -68,7 +69,7 @@ def main() -> None:
               "-f", demuxer, "-i", f"/proc/self/fd/{audio_fd}", "-map", "0:a:0",
               "-vn", "-sn", "-dn", "-t", str(MAX_AUDIO_SECONDS + 1), "-ac", "1",
               "-ar", "16000", "-c:a", "pcm_s16le", "-f", "wav", str(decoded)],
-             pass_fds=(audio_fd, decoder_fd))
+             pass_fds=(audio_fd, decoder_fd, *guard))
         os.close(audio_fd)
         with wave.open(str(decoded), "rb") as audio:
             frames = audio.getnframes()
@@ -92,7 +93,7 @@ def main() -> None:
                        "--threads", "2", "--no-gpu", "--print-progress"]
             if args["task"] == "translate":
                 command.append("--translate")
-            _run(command, pass_fds=(engine_fd, model_fd))
+            _run(command, pass_fds=(engine_fd, model_fd, *guard))
             payload = destination.with_suffix(".json").read_bytes()
             if len(payload) > MAX_RESULT_BYTES:
                 raise ValueError("engine result exceeds bound")

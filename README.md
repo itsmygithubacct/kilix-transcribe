@@ -110,3 +110,41 @@ real receipt/installer operations. Put the reviewed `kilix-content` package on
 Run `make check` for the design/interface controls and unit tests. Process
 supervision tests use explicit fake tools; passing them is not model-quality
 or hardware-profile acceptance.
+
+
+### Shared execution coordination
+
+`serve --lease-device cpu-development` explicitly selects the optional
+`voicelib.device_leases` v1 API. The same private default namespace coordinates
+all participating providers; `--lease-namespace` selects a shared private
+absolute namespace for isolated deployments or tests. A namespace requires a
+device label. Selecting this policy requires the API to be installed and never
+falls back to uncoordinated execution. The label grants coordination only;
+it does not select a GPU, establish measured fit, or qualify a resource profile.
+The explicitly selected CPU runtime continues to execute CPU inference.
+
+A job waits for the shared grant before copying or allocating model bytes. Its
+normal provider job slot remains occupied while queued; cancellation,
+disconnection and the original deadline remain effective, with bounded queued
+progress events. The grant is inherited by the dedicated supervisor and retained
+through descendant teardown. Transcription also propagates it through the
+decoder and inference worker; synthesis retains another copy in the namespace
+launcher for the sandbox lifetime.
+
+A private seqpacket channel carries exactly one cleanup acknowledgment from the
+supervisor after all its owned descendants are reaped. The provider checks the
+kernel sender PID/UID/GID and complete message before acknowledging the grant.
+Normal success, engine errors and cancellation can release only after that
+proof. A spawn that created no child can release directly. Missing, malformed
+or wrong-sender proof makes the service unavailable and leaves shared ownership
+quarantined, even after all guard descriptors disappear. An unload or service
+restart does not reset persistent quarantine. There is no automatic recovery
+from unproven ownership in this API. Unrelated embedding-process children are
+never adopted or reaped by the provider.
+
+Existing direct development execution remains available without this explicit
+policy, and still requires supervisor cleanup proof. Its in-process unavailable
+state cannot establish persistent coordination across provider restarts. Shared
+lease, installed asset, hardware admission, microphone policy and release
+qualification are separate requirements; passing local controls supplies none
+of the unmeasured qualifications.

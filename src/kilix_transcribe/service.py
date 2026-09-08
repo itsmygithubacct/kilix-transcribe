@@ -52,8 +52,10 @@ def _reply(request: ProviderRequest, kind: str, result: dict) -> dict:
 
 
 class Service:
-    def __init__(self, runtime: InstalledRuntime, directory: Path):
+    def __init__(self, runtime: InstalledRuntime, directory: Path, *, execution_policy=None):
         self.runtime = runtime
+        self.execution_policy = execution_policy
+        self._unavailable = False
         self.directory = private_directory(directory)
         self.path = directory / SOCKET_NAME
         self.stopping = threading.Event()
@@ -167,6 +169,8 @@ class Service:
                 if request.arguments["audio"]["byte_length"] > MAX_INPUT_BYTES:
                     raise ProtocolError("LIMIT_EXCEEDED", "input exceeds runtime bound")
                 with self._mutex:
+                    if self._unavailable:
+                        raise ProtocolError("SUPERVISOR_FAILED", "owned cleanup remains unproven")
                     if self._jobs or self.stopping.is_set():
                         raise ProtocolError("BUSY", "speech worker is busy")
                     cancellation = threading.Event()
@@ -185,7 +189,8 @@ class Service:
             elif request.operation == "status":
                 with self._mutex:
                     busy = bool(self._jobs)
-                result = {"provider_state": "busy" if busy else "ready", "worker_active": busy,
+                    unavailable = self._unavailable
+                result = {"provider_state": "unavailable" if unavailable else "busy" if busy else "ready", "worker_active": busy,
                           "engine_id": "whisper.cpp", "model_id": self.runtime.model_id,
                           "release_qualified": False}
                 kind = "status"
@@ -200,6 +205,8 @@ class Service:
                 kind = "canceled"
             elif request.operation == "unload":
                 with self._mutex:
+                    if self._unavailable:
+                        raise ProtocolError("SUPERVISOR_FAILED", "owned cleanup remains unproven")
                     if self._jobs:
                         raise ProtocolError("BUSY", "cannot unload during a job")
                 result = {"loaded": False}
@@ -207,8 +214,14 @@ class Service:
             else:
                 channel.settimeout(max(0.001, deadline - time.monotonic()))
                 send_packet(channel, _reply(request, "accepted", {}))
+                def queued(status):
+                    channel.settimeout(max(0.001, deadline - time.monotonic()))
+                    send_packet(channel, _reply(request, "queued", {
+                        "state": status.state, "position": status.position,
+                        "lease_version": status.version}))
                 result = run_job(self.runtime, snapshot, request.arguments,
                                  deadline=deadline, cancel=cancellation,
+                                 execution_policy=self.execution_policy, job_id=request.job_id, progress=queued,
                                  disconnected=lambda: self.stopping.is_set() or _closed(channel))
                 # Long transcripts use the same bounded descriptor mechanism
                 # as audio. No transcript is retained after the connection.
@@ -232,6 +245,9 @@ class Service:
                 return
             send_packet(channel, _reply(request, kind, result))
         except (ProtocolError, OSError, ValueError, KeyError) as error:
+            if isinstance(error, ProtocolError) and error.code == "SUPERVISOR_FAILED":
+                with self._mutex:
+                    self._unavailable = True
             finish_job()
             if request is not None:
                 code = error.code if isinstance(error, ProtocolError) else "PROVIDER_ERROR"

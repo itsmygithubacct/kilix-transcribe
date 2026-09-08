@@ -237,12 +237,22 @@ def stop_process(process: subprocess.Popen) -> None:
 
 def run_job(runtime: InstalledRuntime, audio_fd: int, args: dict, *,
             deadline: float, cancel: threading.Event,
-            disconnected: Callable[[], bool] = lambda: False) -> dict:
+            disconnected: Callable[[], bool] = lambda: False,
+            execution_policy=None, job_id=None, progress=None) -> dict:
+    from .owned import OwnedExecution
+    with OwnedExecution(execution_policy, job_id=job_id, workload="stt-job", deadline=deadline,
+                        cancelled=cancel.is_set, disconnected=disconnected, progress=progress) as owner:
+        return _run_owned_job(runtime, audio_fd, args, deadline=deadline, cancel=cancel,
+                              disconnected=disconnected, owner=owner)
+
+
+def _run_owned_job(runtime, audio_fd, args, *, deadline, cancel, disconnected, owner):
     if cancel.is_set() or disconnected():
         raise ProtocolError("CANCELED", "job canceled")
     if time.monotonic() >= deadline:
         raise ProtocolError("DEADLINE_EXCEEDED", "job deadline exceeded")
     def check():
+        owner.check()
         if cancel.is_set() or disconnected():
             raise ProtocolError("CANCELED", "job canceled")
         if time.monotonic() >= deadline:
@@ -261,7 +271,7 @@ def run_job(runtime: InstalledRuntime, audio_fd: int, args: dict, *,
         job = {"runtime_fds": runtime_fds, "manifest": runtime.manifest,
                "audio_fd": audio_fd, "args": args,
                "workspace": workspace}
-        process = subprocess.Popen(
+        process = owner.spawn(
             [sys.executable, "-I", str(worker)], stdin=subprocess.PIPE,
             stdout=output, stderr=subprocess.DEVNULL, env=environment,
             pass_fds=(audio_fd, *runtime_fds.values()), start_new_session=True,
@@ -271,6 +281,7 @@ def run_job(runtime: InstalledRuntime, audio_fd: int, args: dict, *,
             process.stdin.write(json.dumps(job, separators=(",", ":")).encode())
             process.stdin.close()
             while process.poll() is None:
+                owner.check()
                 if cancel.is_set() or disconnected():
                     raise ProtocolError("CANCELED", "job canceled")
                 if time.monotonic() >= deadline:
@@ -294,4 +305,4 @@ def run_job(runtime: InstalledRuntime, audio_fd: int, args: dict, *,
                 raise ProtocolError("ENGINE_FAILED", "unbound worker result")
             return result
         finally:
-            stop_process(process)
+            owner.finish(process, stop_process)
