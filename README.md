@@ -159,3 +159,13 @@ setuptools 78.1.0 and wheel 0.45.1; the provider itself uses the standard librar
 Engine executables, model bytes, optional `kilix-content` authority and shared
 `kilix-voice` coordination are installed and selected separately. Building a
 wheel supplies neither a model download nor a source-license grant.
+
+
+The Python client accepts `client_request(..., cancelled=callback)` for submit
+operations. The callback must promptly return a boolean. Controlled calls keep
+the requested deadline and observe cancellation during receive waits. On
+cancellation the client attempts a short cancel request for that submitted job,
+closes its own channel and descriptors, and raises `CANCELED`. This is local
+cancellation: neither it nor a cancel ACK proves provider cleanup. Check provider
+status before a successor job; busy or unavailable remains authoritative. No
+background request thread is retained. Borrowed input descriptors stay open.
