@@ -63,8 +63,8 @@ worker do not log input audio or transcripts.
 
 This is a working development runtime, **not a qualified release profile**.
 Its digest-bound `kilix.transcribe.runtime/v1` manifest is not an F100 install
-authority or license receipt. Model/source selection for release, F100/F106
-binding, resource admission, GPU profiles, corpus accuracy comparisons,
+authority or license receipt. Production asset admission, F106 binding,
+resource admission, GPU profiles, corpus accuracy comparisons,
 streaming recognition, microphone recording, VAD, diarization and the required
 soak remain open. Unsupported diarization refuses explicitly. Commands that
 need an unstaged runtime retain `RUNTIME_UNSELECTED` and exit 69.
@@ -74,6 +74,38 @@ The existing design ledger in `design/transcribe-candidate-v1.json` preserves
 routes. Its unselected state describes qualification, not the presence of the
 new development CPU path. No model weights, runtime executables, audio,
 license receipts or release pins are included.
+
+## Installed model descriptors
+
+With the reviewed `kilix-content` installed-asset API provisioned, select the
+catalog model at service startup:
+
+```sh
+kilix-transcribe serve --runtime-root /absolute/runtime \
+  --installed-asset whisper-tiny-ggml \
+  --content-root /absolute/installed-content \
+  --model-snapshot-bytes 80000000
+```
+
+The explicit byte ceiling bounds model snapshots; it is not hardware admission.
+The runtime manifest still names the exact engine, decoder and model digests.
+Engine/decoder files remain under `runtime-root`; `model.bin` comes only from
+the authorized installed population. The catalog's provider, consumer version,
+model revision and full model population must match. Missing assets or receipts
+refuse without falling back to pathname models.
+
+Receipt storage opens once during bounded service startup and closes after
+shutdown. Each job rechecks durable receipts and all installed files under its
+cancellation/deadline checks and an additional 120-second snapshot ceiling.
+The provider requires read-only sealed model descriptors and independently
+hashes the actual bytes before passing them to the owned worker. No model path,
+catalog or release identity is accepted on wire, and the provider creates no
+license receipt. This supplies packaged receipt binding, not full transaction
+or resource-profile qualification.
+
+The installed integration tests use explicit synthetic packaged catalogs with
+real receipt/installer operations. Put the reviewed `kilix-content` package on
+`PYTHONPATH` to run them; they report skips when that optional API is absent.
 
 Run `make check` for the design/interface controls and unit tests. Process
 supervision tests use explicit fake tools; passing them is not model-quality

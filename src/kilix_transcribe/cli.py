@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import nullcontext
 import hashlib
 import json
 import os
@@ -23,6 +24,9 @@ def parser() -> argparse.ArgumentParser:
         subparser = commands.add_parser(command)
         if command == "serve":
             subparser.add_argument("--runtime-root", type=Path)
+            subparser.add_argument("--installed-asset")
+            subparser.add_argument("--content-root", type=Path)
+            subparser.add_argument("--model-snapshot-bytes", type=int)
         elif command == "file":
             subparser.add_argument("input", type=Path, nargs="?")
             subparser.add_argument("--format", choices=("text", "json", "webvtt", "srt"), default="text")
@@ -40,11 +44,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         from .runtime import InstalledRuntime, MAX_INPUT_BYTES
         from .service import Service, client_request, request_value, runtime_directory
 
+        if arguments.command == "serve":
+            from .content import from_options
+            model_source = from_options(arguments, provider="kilix-transcribe",
+                                        consumer_schema="kilix.transcribe.runtime")
         if arguments.command == "serve" and arguments.runtime_root is not None:
-            service = Service(InstalledRuntime(arguments.runtime_root), runtime_directory())
-            for sig in (signal.SIGINT, signal.SIGTERM):
-                signal.signal(sig, lambda _sig, _frame: service.stop())
-            service.serve()
+            with model_source if model_source is not None else nullcontext():
+                service = Service(InstalledRuntime(arguments.runtime_root, model_source=model_source), runtime_directory())
+                for sig in (signal.SIGINT, signal.SIGTERM):
+                    signal.signal(sig, lambda _sig, _frame: service.stop())
+                service.serve()
             return 0
         if arguments.command == "file" and arguments.input is not None:
             descriptor = os.open(arguments.input, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)

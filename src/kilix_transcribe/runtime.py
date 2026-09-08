@@ -15,7 +15,6 @@ import fcntl
 import json
 import os
 from pathlib import Path
-import signal
 import stat
 import subprocess
 import sys
@@ -46,7 +45,7 @@ def memory_file() -> int:
     return descriptor
 
 
-def digest_file(path: Path) -> str:
+def digest_file(path: Path, check: Callable[[], None] = lambda: None) -> str:
     digest = hashlib.sha256()
     descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
     with os.fdopen(descriptor, "rb") as source:
@@ -55,6 +54,7 @@ def digest_file(path: Path) -> str:
             raise ProtocolError("INVALID_RUNTIME", "runtime source is not a regular file")
         remaining = info.st_size
         while remaining:
+            check()
             block = source.read(min(remaining, 1024 * 1024))
             if not block:
                 raise ProtocolError("INVALID_RUNTIME", "runtime source ended early")
@@ -78,8 +78,9 @@ def private_directory(path: Path, *, create: bool = False) -> Path:
 
 
 class InstalledRuntime:
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, *, model_source=None):
         self.root = private_directory(root)
+        self.model_source = model_source
         root_fd, self._directories = self._open_root()
         os.close(root_fd)
         manifest = root / "runtime.json"
@@ -102,6 +103,15 @@ class InstalledRuntime:
             raise ProtocolError("INVALID_RUNTIME", "incomplete runtime files")
         self._identities = {}
         for name, expected in files.items():
+            if (type(expected) is not str or len(expected) != 64
+                    or any(c not in "0123456789abcdef" for c in expected)):
+                raise ProtocolError("INVALID_RUNTIME", "invalid runtime file digest")
+            if name == "model.bin" and model_source is not None:
+                if (model["id"] != "whisper-tiny"
+                        or model["revision"] != "5359861c739e955e79d9a303bcbc70fb988958b1"):
+                    raise ProtocolError("INVALID_RUNTIME", "unsupported installed model identity")
+                model_source.bind("whisper-tiny-ggml", model["revision"], {name: expected})
+                continue
             path = root / name
             before = path.lstat()
             if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.geteuid()
@@ -149,6 +159,8 @@ class InstalledRuntime:
             if directories != self._directories:
                 raise ProtocolError("INVALID_RUNTIME", "runtime directory identity changed")
             for name, expected in self.manifest["files"].items():
+                if name == "model.bin" and self.model_source is not None:
+                    continue
                 check()
                 source = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=root_fd)
                 snapshot = -1
@@ -185,19 +197,23 @@ class InstalledRuntime:
                     os.close(source)
                     if snapshot >= 0:
                         os.close(snapshot)
+            if self.model_source is not None:
+                with self.model_source.open(check) as asset:
+                    descriptors["model.bin"] = self.model_source.descriptor(
+                        asset, "model.bin", check, verify_bytes=True)
             yield descriptors
         finally:
             os.close(root_fd)
             for descriptor in descriptors.values():
                 os.close(descriptor)
 
-    def verify_unchanged(self) -> None:
+    def verify_unchanged(self, check: Callable[[], None] = lambda: None) -> None:
         for name, identity in self._identities.items():
             path = self.root / name
             # Same-size writes can share a filesystem timestamp. Metadata
             # equality alone is not proof that installed bytes are unchanged.
             if (self._identity(path.lstat()) != identity
-                    or digest_file(path) != self.manifest["files"][name]):
+                    or digest_file(path, check) != self.manifest["files"][name]):
                 raise ProtocolError("INVALID_RUNTIME", "runtime files changed; restart required")
 
     def model_record(self) -> dict:
@@ -226,12 +242,12 @@ def run_job(runtime: InstalledRuntime, audio_fd: int, args: dict, *,
         raise ProtocolError("CANCELED", "job canceled")
     if time.monotonic() >= deadline:
         raise ProtocolError("DEADLINE_EXCEEDED", "job deadline exceeded")
-    runtime.verify_unchanged()
     def check():
         if cancel.is_set() or disconnected():
             raise ProtocolError("CANCELED", "job canceled")
         if time.monotonic() >= deadline:
             raise ProtocolError("DEADLINE_EXCEEDED", "job deadline exceeded")
+    runtime.verify_unchanged(check)
     if args["task"] == "diarize":
         raise ProtocolError("UNSUPPORTED_CAPABILITY", "no diarization profile is installed")
     if not 0 < os.fstat(audio_fd).st_size <= MAX_INPUT_BYTES:
