@@ -150,6 +150,27 @@ class RecordingTests(unittest.TestCase):
             self.assertEqual(error.exception.code, "SUPERVISOR_FAILED")
             self.assertFalse((fixture.installation / "engine.pid").exists())
 
+    def test_lock_loss_during_final_result_receive_refuses_transcript(self):
+        import kilix_transcribe.service as module
+        for late_state in (True, None):
+            with self.subTest(late_state=late_state), provider() as fixture:
+                state = [False]
+                received = threading.Event()
+                original = module.receive_packet
+
+                def locked_at_delivery(channel):
+                    value, descriptors = original(channel)
+                    if value.get("type") == "result":
+                        state[0] = late_state
+                        received.set()
+                    return value, descriptors
+
+                with patch.object(module, "receive_packet", locked_at_delivery), self.assertRaises(ProtocolError) as error:
+                    record_and_transcribe(fixture.ipc, **self.options(locked=lambda: state[0]), timeout=5)
+                self.assertTrue(received.is_set(), "valid actual result packet was not reached")
+                self.assertEqual(error.exception.code, "CANCELED")
+                self.assertEqual(self.phases[-1], "inactive")
+
     def test_dropped_frames_never_submit(self):
         with provider() as fixture:
             # Force a real recorder to fill/drop from the bounded queue before
@@ -188,10 +209,22 @@ class RecordingTests(unittest.TestCase):
             self.assertFalse((fixture.installation / "engine.pid").exists())
             self.assertEqual(self.phases[-1], "inactive")
 
-    def test_cancel_during_asr_waits_for_actual_escaped_tree_reap(self):
+    def test_local_cancel_and_provider_cleanup_are_separate_observations(self):
+        import kilix_transcribe.service as module
         with provider("escape") as fixture:
             cancellation = threading.Event()
             finished = threading.Event()
+            reaped = threading.Event()
+            release = threading.Event()
+            original = module.run_job
+
+            def held_terminal(*args, **kwargs):
+                try:
+                    return original(*args, **kwargs)
+                finally:
+                    reaped.set()
+                    release.wait(4)
+
             def wait_for_engine():
                 until = time.monotonic() + 3
                 while time.monotonic() < until and not finished.is_set():
@@ -202,13 +235,26 @@ class RecordingTests(unittest.TestCase):
             observer = threading.Thread(target=wait_for_engine)
             observer.start()
             try:
-                with self.assertRaises(ProtocolError) as error:
+                with patch.object(module, "run_job", held_terminal), self.assertRaises(ProtocolError) as error:
                     record_and_transcribe(fixture.ipc, **self.options(cancelled=cancellation.is_set), timeout=8)
                 self.assertEqual(error.exception.code, "CANCELED")
+                # Local CANCELED is not a provider terminal/cleanup proof. Hold
+                # the actual job's final return so status remains authoritative.
+                self.assertTrue(reaped.wait(2), "actual owned teardown did not complete")
+                status = client_request(fixture.ipc, request_value("status"))
+                self.assertEqual(status["provider_state"], "busy")
+                self.assertTrue(status["worker_active"])
                 for name in ("engine.pid", "escaped.pid"):
                     self.assertFalse((Path("/proc") / (fixture.installation / name).read_text()).exists())
+                release.set()
+                until = time.monotonic() + 2
+                while time.monotonic() < until:
+                    if client_request(fixture.ipc, request_value("status"))["provider_state"] == "ready":
+                        break
+                    time.sleep(.01)
                 self.assertEqual(client_request(fixture.ipc, request_value("status"))["provider_state"], "ready")
             finally:
+                release.set()
                 finished.set()
                 observer.join(4)
             self.assertFalse(observer.is_alive())

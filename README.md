@@ -193,9 +193,12 @@ clients, and keeps bounded mono16k PCM in memory. Recognition begins after all
 recorder descendants are proved reaped. Its read-only WAV descriptor goes
 through the existing provider byte checks. No raw recording or transcript is
 persisted by default, and the CLI never types keys or Enter. Cancel during
-recognition sends the exact job ID and awaits the original terminal response
-within a bounded cleanup window; failure to receive that proof closes the
-connection and cannot return a transcript.
+recognition requests cancellation for the exact job ID, closes the client's
+channel and raises CANCELED without returning a transcript. Local cancellation
+or an ACK does not prove provider cleanup; busy/unavailable status remains
+authoritative before a successor request.
+The same actual lock-state authority is retained through recognition and final
+delivery; lock loss or an unknown state refuses a late transcript as well.
 
 Embedders use `recording.capture_wav` with a required visible `indicator`
 callback and bounded cancellation/disconnect/lock authorities, or
@@ -204,3 +207,17 @@ configuration and private test namespaces are local embedding controls, never
 accepted from provider IPC. The optional Python API must be installed; missing
 managed microphone support refuses instead of opening an unmanaged device.
 Synthetic recorder/ASR tests exercise these boundaries without physical capture.
+
+## Controlled client delivery
+
+The Python client accepts `client_request(..., cancelled=callback)` for submit
+operations. The callback must promptly return a boolean. Controlled calls keep
+the requested deadline and observe cancellation during receive waits. On
+cancellation the client attempts a short cancel request for that submitted job,
+closes its own channel and descriptors, and raises `CANCELED`. This is local
+cancellation: neither it nor a cancel ACK proves provider cleanup. Check provider
+status before a successor job; busy or unavailable remains authoritative. No
+background request thread is retained. Borrowed input descriptors stay open.
+The client rechecks the original deadline after validation, immediately before
+returning output. Expired delivery is refused with `DEADLINE_EXCEEDED`, including
+short control responses; received descriptors are still closed on refusal.

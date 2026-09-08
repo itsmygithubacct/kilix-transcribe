@@ -276,14 +276,20 @@ def request_value(operation: str, *, job_id: str | None = None,
 
 
 def client_request(directory: Path, value: dict, descriptor: int | None = None, *, cancelled=None) -> dict:
-    if cancelled is not None and (not callable(cancelled) or value.get("op") != "submit"):
-        raise ProtocolError("INVALID_REQUEST", "cancellation callback requires a submit request")
-    if cancelled is not None:
+    ProviderRequest.from_payload(value)
+    if cancelled is not None and (not callable(cancelled) or value['op'] != 'submit'):
+        raise ProtocolError('INVALID_REQUEST', 'cancellation callback requires a submit request')
+
+    def cancellation_requested():
+        if cancelled is None:
+            return False
         decision = cancelled()
         if type(decision) is not bool:
-            raise ProtocolError("INVALID_REQUEST", "cancellation callback must return boolean")
-        if decision:
-            raise ProtocolError("CANCELED", "job canceled before submission")
+            raise ProtocolError('INVALID_REQUEST', 'cancellation callback must return boolean')
+        return decision
+
+    if cancellation_requested():
+        raise ProtocolError('CANCELED', 'job canceled before submission')
     private_directory(directory)
     path = directory / SOCKET_NAME
     info = path.lstat()
@@ -291,28 +297,41 @@ def client_request(directory: Path, value: dict, descriptor: int | None = None, 
         raise ProtocolError("UNAUTHORIZED_PEER", "unsafe provider endpoint")
     deadline = time.monotonic() + value["deadline_ms"] / 1000
     with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as channel:
-        channel.settimeout(max(0.001, deadline - time.monotonic()))
-        channel.connect(str(path))
+        remaining = max(0.001, deadline - time.monotonic())
+        channel.settimeout(min(0.2, remaining) if cancelled is not None else remaining)
+        try:
+            channel.connect(str(path))
+        except OSError as error:
+            if cancellation_requested():
+                raise ProtocolError('CANCELED', 'job canceled before submission') from error
+            raise ProtocolError('TRANSPORT_ERROR', 'provider connection failed') from error
         require_same_uid_peer(channel)
+        if cancellation_requested():
+            raise ProtocolError('CANCELED', 'job canceled before submission')
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ProtocolError("DEADLINE_EXCEEDED", "provider deadline exceeded before submission")
+        channel.settimeout(min(0.2, remaining) if cancelled is not None else remaining)
         send_packet(channel, value, descriptor)
-        cancel_sent = False
         for _ in range(256):
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise ProtocolError("DEADLINE_EXCEEDED", "provider deadline exceeded")
             if cancelled is not None:
                 while True:
-                    if not cancel_sent:
-                        decision = cancelled()
-                        if type(decision) is not bool:
-                            raise ProtocolError("INVALID_REQUEST", "cancellation callback must return boolean")
-                        if decision:
-                            # Cancel only this job and keep its original channel
-                            # open for the post-reap terminal acknowledgement.
+                    if cancellation_requested():
+                        remaining = deadline - time.monotonic()
+                        if remaining < 0.001:
+                            raise ProtocolError("DEADLINE_EXCEEDED", "provider cancellation deadline exceeded")
+                        try:
                             client_request(directory, request_value("cancel", job_id=value["job_id"],
-                                           timeout=min(1, max(0.001, remaining))))
-                            cancel_sent = True
-                            deadline = min(deadline, time.monotonic() + 6)
+                                           timeout=min(0.2, remaining)))
+                        except (ProtocolError, OSError):
+                            pass
+                        # Return closes our original channel and descriptors.
+                        # Neither local cancellation nor an ACK proves that
+                        # the provider has finished its authenticated teardown.
+                        raise ProtocolError("CANCELED", "client canceled; provider cleanup pending")
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         raise ProtocolError("DEADLINE_EXCEEDED", "provider cancellation deadline exceeded")
@@ -368,13 +387,17 @@ def client_request(directory: Path, value: dict, descriptor: int | None = None, 
                     if len(payload) != info.st_size or hashlib.sha256(payload).hexdigest() != metadata["sha256"]:
                         raise ProtocolError("DESCRIPTOR_MISMATCH", "transcript digest mismatch")
                     decoded = decode_result(payload, result, value["args"])
-                    if cancel_sent:
+                    if cancellation_requested():
                         raise ProtocolError("CANCELED", "job canceled before delivery")
+                    if time.monotonic() >= deadline:
+                        raise ProtocolError("DEADLINE_EXCEEDED", "provider deadline exceeded before delivery")
                     return decoded
                 expected = {"hello": "hello", "status": "status", "models": "models",
                             "unload": "unloaded", "cancel": "canceled"}.get(value["op"])
                 if descriptors or event.get("type") != expected:
                     raise ProtocolError("INVALID_RESPONSE", "unexpected provider response")
+                if time.monotonic() >= deadline:
+                    raise ProtocolError("DEADLINE_EXCEEDED", "provider deadline exceeded before delivery")
                 return result
             finally:
                 for received in descriptors:

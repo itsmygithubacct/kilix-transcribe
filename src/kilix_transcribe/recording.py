@@ -179,6 +179,11 @@ def record_and_transcribe(directory: Path, *, seconds, indicator, task="transcri
     seconds = _seconds(seconds)
     if type(timeout) not in (int, float) or not seconds < timeout <= 3600 or not math.isfinite(timeout):
         raise ProtocolError("INVALID_REQUEST", "timeout must include capture and recognition within 3600 seconds")
+    try:
+        from voicelib.microphone import LogindLockState
+    except ImportError as error:
+        raise ProtocolError("UNSUPPORTED_CAPABILITY", "managed microphone support is not installed") from error
+    lock_state = LogindLockState() if locked is None else locked
     started = time.monotonic()
     # Validate the entire requested transcript selection before opening audio.
     arguments = {"task": task, "language": language, "output": output, "audio_fd": 0,
@@ -195,7 +200,7 @@ def record_and_transcribe(directory: Path, *, seconds, indicator, task="transcri
     if timeout - (time.monotonic() - started) <= seconds:
         raise ProtocolError("DEADLINE_EXCEEDED", "insufficient deadline remains for recording")
     clip = capture_wav(seconds=seconds, indicator=indicator, cancelled=cancelled, disconnected=disconnected,
-                       locked=locked, provider_alive=lifetime, namespace=namespace, config=config, vad=vad)
+                       locked=lock_state, provider_alive=lifetime, namespace=namespace, config=config, vad=vad)
     arguments["audio"] = {"media_type": "audio/wav", "byte_length": len(clip.wav),
                           "sha256": hashlib.sha256(clip.wav).hexdigest()}
     remaining = timeout - (time.monotonic() - started)
@@ -208,6 +213,7 @@ def record_and_transcribe(directory: Path, *, seconds, indicator, task="transcri
         descriptor = os.open(f"/proc/self/fd/{writer.fileno()}", os.O_RDONLY | os.O_CLOEXEC)
         try:
             return client_request(directory, value, descriptor,
-                                  cancelled=lambda: _boolean(cancelled) or _boolean(disconnected))
+                                  cancelled=lambda: (_boolean(cancelled) or _boolean(disconnected)
+                                                     or _boolean(lock_state)))
         finally:
             os.close(descriptor)
