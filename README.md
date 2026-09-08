@@ -148,3 +148,14 @@ state cannot establish persistent coordination across provider restarts. Shared
 lease, installed asset, hardware admission, microphone policy and release
 qualification are separate requirements; passing local controls supplies none
 of the unmeasured qualifications.
+
+
+### Installing the Python provider
+
+The source builds a standard Python wheel for the selected Python 3.12 runtime,
+with the `kilix-transcribe` console entry point and the bounded Python client.
+The wheel contains the provider package only. Its build tools are pinned to
+setuptools 78.1.0 and wheel 0.45.1; the provider itself uses the standard library.
+Engine executables, model bytes, optional `kilix-content` authority and shared
+`kilix-voice` coordination are installed and selected separately. Building a
+wheel supplies neither a model download nor a source-license grant.
