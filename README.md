@@ -169,3 +169,6 @@ closes its own channel and descriptors, and raises `CANCELED`. This is local
 cancellation: neither it nor a cancel ACK proves provider cleanup. Check provider
 status before a successor job; busy or unavailable remains authoritative. No
 background request thread is retained. Borrowed input descriptors stay open.
+The client rechecks the original deadline after validation, immediately before
+returning output. Expired delivery is refused with `DEADLINE_EXCEEDED`, including
+short control responses; received descriptors are still closed on refusal.

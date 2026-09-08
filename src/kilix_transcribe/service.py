@@ -389,11 +389,15 @@ def client_request(directory: Path, value: dict, descriptor: int | None = None, 
                     decoded = decode_result(payload, result, value["args"])
                     if cancellation_requested():
                         raise ProtocolError("CANCELED", "job canceled before delivery")
+                    if time.monotonic() >= deadline:
+                        raise ProtocolError("DEADLINE_EXCEEDED", "provider deadline exceeded before delivery")
                     return decoded
                 expected = {"hello": "hello", "status": "status", "models": "models",
                             "unload": "unloaded", "cancel": "canceled"}.get(value["op"])
                 if descriptors or event.get("type") != expected:
                     raise ProtocolError("INVALID_RESPONSE", "unexpected provider response")
+                if time.monotonic() >= deadline:
+                    raise ProtocolError("DEADLINE_EXCEEDED", "provider deadline exceeded before delivery")
                 return result
             finally:
                 for received in descriptors:
