@@ -83,6 +83,46 @@ class TranscribeDesignTests(unittest.TestCase):
         mutant["requirements"][0]["requirement"] = "Drifted requirement"
         self.refusal(mutant, "REQUIREMENT_IDENTITY")
 
+    def test_schema_drift_is_refused(self) -> None:
+        mutant = copy.deepcopy(self.design)
+        mutant["schema"] = "kilix.transcribe.design/drifted"
+        self.refusal(mutant, "SCHEMA")
+
+    def test_status_drift_is_refused(self) -> None:
+        mutant = copy.deepcopy(self.design)
+        mutant["status"] = "SELECTED_FOR_RELEASE"
+        self.refusal(mutant, "STATUS")
+
+    def test_missing_task_is_refused(self) -> None:
+        mutant = copy.deepcopy(self.design)
+        mutant["tasks"].remove("diarize")
+        self.refusal(mutant, "TASKS")
+
+    def test_missing_exclusion_is_refused(self) -> None:
+        mutant = copy.deepcopy(self.design)
+        mutant["excluded_capabilities"].remove("cloud_transcription")
+        self.refusal(mutant, "EXCLUSIONS")
+
+    def test_open_socket_mode_is_refused(self) -> None:
+        mutant = copy.deepcopy(self.design)
+        mutant["transport"]["socket_mode"] = "0666"
+        self.refusal(mutant, "TRANSPORT")
+
+    def test_missing_forbidden_field_is_refused(self) -> None:
+        mutant = copy.deepcopy(self.design)
+        mutant["forbidden_request_fields"].remove("shell")
+        self.refusal(mutant, "FORBIDDEN_FIELDS")
+
+    def test_route_identity_extra_field_is_refused(self) -> None:
+        mutant = copy.deepcopy(self.design)
+        mutant["engine_routes"][0]["note"] = "unreviewed extra field"
+        self.refusal(mutant, "ROUTE_IDENTITY")
+
+    def test_unknown_root_key_is_refused(self) -> None:
+        mutant = copy.deepcopy(self.design)
+        mutant["release_profile"] = {"engine": "whisper-cpp", "selected": True}
+        self.refusal(mutant, "UNKNOWN_ROOT_KEY")
+
 
 if __name__ == "__main__":
     unittest.main()

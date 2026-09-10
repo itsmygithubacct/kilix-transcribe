@@ -126,6 +126,22 @@ EXPECTED_ROUTES = [
 EXPECTED_FORBIDDEN_FIELDS = [
     "path", "url", "command", "shell", "executable", "environment", "module", "import",
 ]
+EXPECTED_ROOT_KEYS = (
+    "schema",
+    "status",
+    "commands",
+    "tasks",
+    "outputs",
+    "transport",
+    "decoder_limits",
+    "source_objects",
+    "engine_routes",
+    "capture_stop_conditions",
+    "forbidden_request_fields",
+    "excluded_capabilities",
+    "retention",
+    "requirements",
+)
 EXPECTED_CATEGORY_COUNTS = {
     "boundary": 6,
     "transport": 6,
@@ -156,6 +172,10 @@ def require(condition: bool, code: str, message: str) -> None:
 
 
 def validate_design(design: dict[str, Any]) -> None:
+    require(type(design) is dict, "INVALID_DESIGN", "design root must be an object")
+    extra = set(design) - set(EXPECTED_ROOT_KEYS)
+    require(not extra, "UNKNOWN_ROOT_KEY",
+            "design root contains unknown keys: " + ", ".join(sorted(extra)))
     require(design.get("schema") == "kilix.transcribe.design/candidate-v1",
             "SCHEMA", "design schema identity drifted")
     require(design.get("status") == "PREP7_DESIGN_CANDIDATE_NOT_SELECTED",
@@ -262,6 +282,38 @@ def negative_controls(design: dict[str, Any]) -> None:
     retained["retention"]["transcripts_by_default"] = True
     mutations.append(("default-retention", retained, "RETENTION"))
 
+    schema = copy.deepcopy(design)
+    schema["schema"] = "kilix.transcribe.design/drifted"
+    mutations.append(("schema-drift", schema, "SCHEMA"))
+
+    status = copy.deepcopy(design)
+    status["status"] = "SELECTED_FOR_RELEASE"
+    mutations.append(("status-drift", status, "STATUS"))
+
+    tasks = copy.deepcopy(design)
+    tasks["tasks"].remove("diarize")
+    mutations.append(("missing-diarize", tasks, "TASKS"))
+
+    exclusions = copy.deepcopy(design)
+    exclusions["excluded_capabilities"].remove("cloud_transcription")
+    mutations.append(("missing-exclusion", exclusions, "EXCLUSIONS"))
+
+    transport = copy.deepcopy(design)
+    transport["transport"]["socket_mode"] = "0666"
+    mutations.append(("open-socket-mode", transport, "TRANSPORT"))
+
+    forbidden = copy.deepcopy(design)
+    forbidden["forbidden_request_fields"].remove("shell")
+    mutations.append(("missing-forbidden-field", forbidden, "FORBIDDEN_FIELDS"))
+
+    route = copy.deepcopy(design)
+    route["engine_routes"][0]["note"] = "unreviewed extra field"
+    mutations.append(("route-extra-field", route, "ROUTE_IDENTITY"))
+
+    extra_root = copy.deepcopy(design)
+    extra_root["release_profile"] = {"engine": "whisper-cpp", "selected": True}
+    mutations.append(("unknown-root-key", extra_root, "UNKNOWN_ROOT_KEY"))
+
     for name, mutant, expected in mutations:
         try:
             validate_design(mutant)
@@ -280,7 +332,7 @@ def run() -> None:
         "TRANSCRIBE_DESIGN_CANDIDATE: PASS "
         "(48/48 requirements; 8/8 P0 source objects; 0/8 selected; "
         "4/4 architecture routes; 0/4 selected; 7/7 commands; "
-        "4/4 outputs; 4/4 negative controls)"
+        "4/4 outputs; 12/12 negative controls)"
     )
 
 
