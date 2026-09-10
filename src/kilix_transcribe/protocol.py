@@ -117,19 +117,20 @@ def _utf8_size(value: str) -> int:
         raise ProtocolError("INVALID_REQUEST", "strings must contain Unicode scalar text") from error
 
 
-def _validate_structure(value: Any) -> None:
+def _validate_structure(value: Any, *, maximum_bytes: int = MAX_CONTROL_FRAME_BYTES,
+                        maximum_nodes: int = MAX_JSON_NODES) -> None:
     nodes = 0
     scalar_bytes = 0
     stack: list[tuple[Any, int]] = [(value, 1)]
     while stack:
         current, depth = stack.pop()
         nodes += 1
-        _require(nodes <= MAX_JSON_NODES, "LIMIT_EXCEEDED",
+        _require(nodes <= maximum_nodes, "LIMIT_EXCEEDED",
                  "JSON node population exceeds its bound")
         _require(depth <= MAX_JSON_DEPTH, "LIMIT_EXCEEDED",
                  "JSON nesting exceeds its depth bound")
         if isinstance(current, dict):
-            _require(nodes + len(stack) + len(current) <= MAX_JSON_NODES,
+            _require(nodes + len(stack) + len(current) <= maximum_nodes,
                      "LIMIT_EXCEEDED", "JSON node population exceeds its bound")
             for key, child in current.items():
                 _require(type(key) is str, "INVALID_REQUEST", "object keys must be strings")
@@ -139,7 +140,7 @@ def _validate_structure(value: Any) -> None:
                 scalar_bytes += size
                 stack.append((child, depth + 1))
         elif isinstance(current, list):
-            _require(nodes + len(stack) + len(current) <= MAX_JSON_NODES,
+            _require(nodes + len(stack) + len(current) <= maximum_nodes,
                      "LIMIT_EXCEEDED", "JSON node population exceeds its bound")
             stack.extend((child, depth + 1) for child in current)
         elif type(current) is int:
@@ -155,16 +156,17 @@ def _validate_structure(value: Any) -> None:
             _require(current is None or type(current) is bool, "INVALID_REQUEST",
                      "control frame contains a non-JSON value")
             scalar_bytes += 4
-        _require(scalar_bytes <= MAX_CONTROL_FRAME_BYTES, "LIMIT_EXCEEDED",
+        _require(scalar_bytes <= maximum_bytes, "LIMIT_EXCEEDED",
                  "control scalar population exceeds its byte bound")
 
 
-def decode_payload(payload: bytes) -> dict[str, Any]:
+def decode_payload(payload: bytes, *, maximum_bytes: int = MAX_CONTROL_FRAME_BYTES,
+                   maximum_nodes: int = MAX_JSON_NODES) -> dict[str, Any]:
     """Decode one raw JSON payload with stable bounded failures."""
 
     _require(type(payload) is bytes, "INVALID_REQUEST", "control payload must be bytes")
     _require(bool(payload), "INVALID_REQUEST", "control payload must not be empty")
-    _require(len(payload) <= MAX_CONTROL_FRAME_BYTES, "LIMIT_EXCEEDED",
+    _require(len(payload) <= maximum_bytes, "LIMIT_EXCEEDED",
              "control payload exceeds its byte bound")
     try:
         text = payload.decode("utf-8", errors="strict")
@@ -184,7 +186,7 @@ def decode_payload(payload: bytes) -> dict[str, Any]:
     except (json.JSONDecodeError, RecursionError, ValueError) as error:
         raise ProtocolError("INVALID_REQUEST", "control payload is not valid JSON") from error
     _require(type(value) is dict, "INVALID_REQUEST", "control payload root must be an object")
-    _validate_structure(value)
+    _validate_structure(value, maximum_bytes=maximum_bytes, maximum_nodes=maximum_nodes)
     return value
 
 
@@ -356,6 +358,7 @@ def receive_packet(channel: socket.socket) -> tuple[dict[str, Any], tuple[int, .
         packet, ancillary, flags, _address = channel.recvmsg(
             MAX_CONTROL_FRAME_BYTES + _U32.size,
             socket.CMSG_SPACE(MAX_DESCRIPTORS * array.array("i").itemsize),
+            getattr(socket, "MSG_CMSG_CLOEXEC", 0),
         )
     except OSError as error:
         raise ProtocolError("TRANSPORT_ERROR", "control packet receive failed") from error
