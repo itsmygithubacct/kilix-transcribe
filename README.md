@@ -95,9 +95,12 @@ the authorized installed population. The catalog's provider, consumer version,
 model revision and full model population must match. Missing assets or receipts
 refuse without falling back to pathname models.
 
-Receipt storage opens once during bounded service startup and closes after
-shutdown. Each job rechecks durable receipts and all installed files under its
-cancellation/deadline checks and an additional 120-second snapshot ceiling.
+The provider uses the selected `kilix-content` packaged catalog and
+`kilix-license` shared receipt store. Receipt coverage is checked again for
+every job; the store retains no open descriptor. Each job checks the complete
+installed file population under its cancellation/deadline checks and an
+additional 120-second snapshot ceiling, then copies verified bytes into sealed
+read-only memory files.
 The provider requires read-only sealed model descriptors and independently
 hashes the actual bytes before passing them to the owned worker. No model path,
 catalog or release identity is accepted on wire, and the provider creates no
@@ -105,8 +108,13 @@ license receipt. This supplies packaged receipt binding, not full transaction
 or resource-profile qualification.
 
 The installed integration tests use explicit synthetic packaged catalogs with
-real receipt/installer operations. Put the reviewed `kilix-content` package on
-`PYTHONPATH` to run them; they report skips when that optional API is absent.
+receipts captured through the real agreement authority in a private store.
+The tests exercise the selected Content layout, licence coverage and production
+snapshot implementation without granting any model licence. Put the selected
+`kilix-content` and `kilix-license` packages on `PYTHONPATH` to run them; they
+report skips when those optional packages are absent. Missing or foreign
+receipts, revoked coverage, changed bytes, undeclared members, symlinks,
+cancellation and malformed descriptors refuse without starting inference.
 
 Run `make check` for the design/interface controls and unit tests. Process
 supervision tests use explicit fake tools; passing them is not model-quality
@@ -221,3 +229,10 @@ background request thread is retained. Borrowed input descriptors stay open.
 The client rechecks the original deadline after validation, immediately before
 returning output. Expired delivery is refused with `DEADLINE_EXCEEDED`, including
 short control responses; received descriptors are still closed on refusal.
+
+Installed model directory chains must be owned by the current user or root
+and must not permit group or other writes. The nominated Content root and all
+held descendant directories are checked; replacing the root with a symlink
+refuses. Member files still require current-user ownership and exact catalog
+bytes. This directory policy does not establish hardware admission or release
+qualification.
