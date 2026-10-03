@@ -95,6 +95,22 @@ the authorized installed population. The catalog's provider, consumer version,
 model revision and full model population must match. Missing assets or receipts
 refuse without falling back to pathname models.
 
+To stage the tools and manifest without copying an installed model, use the
+same Content selection with `tools/stage_runtime.py`. Supply the engine and
+decoder paths/digests, model digest, model ID and revision shown in the
+development staging example above, and replace `--model` with:
+
+```sh
+--installed-asset whisper-tiny-ggml \
+--content-root /absolute/installed-content \
+--model-snapshot-bytes 80000000
+```
+
+Staging verifies receipt coverage and the installed population before
+publishing the destination. Installed service startup repeats those checks
+before creating its socket; missing consent or damaged bytes cannot report
+readiness. The runtime directory contains only the tools and manifest.
+
 The provider uses the selected `kilix-content` packaged catalog and
 `kilix-license` shared receipt store. Receipt coverage is checked again for
 every job; the store retains no open descriptor. Each job checks the complete

@@ -62,8 +62,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                                         consumer_schema="kilix.transcribe.runtime")
         if arguments.command == "serve" and arguments.runtime_root is not None:
             with model_source if model_source is not None else nullcontext():
-                service = Service(InstalledRuntime(arguments.runtime_root, model_source=model_source), runtime_directory(),
-                                  execution_policy=execution_policy)
+                runtime = InstalledRuntime(arguments.runtime_root, model_source=model_source)
+                if model_source is not None:
+                    # Refuse missing consent or damaged installed bytes before
+                    # publishing a socket. Each job still rechecks its model.
+                    with model_source.open(lambda: None):
+                        pass
+                service = Service(runtime, runtime_directory(), execution_policy=execution_policy)
                 for sig in (signal.SIGINT, signal.SIGTERM):
                     signal.signal(sig, lambda _sig, _frame: service.stop())
                 service.serve()
