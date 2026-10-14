@@ -92,9 +92,13 @@ def main():
     with (carrier / 'CMakeLists.txt').open('a') as output:
         output.write('\n' + (INPUTS / 'runner.cmake').read_text())
     build = work / 'build'
+    # __FILE__ diagnostics must identify public source paths, rather than the
+    # release builder's home. GCC maps both macro and debug source names.
+    source_flags = (f'-O1 -DNDEBUG -ffile-prefix-map={work}=/usr/src/kilix-diarization '
+                    f'-fmacro-prefix-map={work}=/usr/src/kilix-diarization')
     configure = ['cmake', '-S', str(carrier), '-B', str(build), '-G', 'Ninja',
         '-DBUILD_SHARED_LIBS=ON', '-DBUILD_TESTING=OFF', '-DCMAKE_BUILD_TYPE=MinSizeRel',
-        '-DCMAKE_C_FLAGS_MINSIZEREL=-O1 -DNDEBUG', '-DCMAKE_CXX_FLAGS_MINSIZEREL=-O1 -DNDEBUG',
+        '-DCMAKE_C_FLAGS_MINSIZEREL=' + source_flags, '-DCMAKE_CXX_FLAGS_MINSIZEREL=' + source_flags,
         '-DCMAKE_CXX_STANDARD=17', '-DCMAKE_EXPORT_COMPILE_COMMANDS=ON',
         '-DCMAKE_BUILD_WITH_INSTALL_RPATH=ON', '-DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF',
         '-DCMAKE_FIND_USE_PACKAGE_REGISTRY=OFF', '-DCMAKE_FIND_USE_SYSTEM_PACKAGE_REGISTRY=OFF',
