@@ -86,7 +86,8 @@ speaker-accuracy or sustained-load profile.
 `tools/build_diarization_native.py` builds the CPU runner from exact local
 software archives without fetching. `tools/stage_diarization_tool.py` creates
 the optional receipt-gated conversion tool from committed product source and
-the pinned Python/export environment. Conversion reads only the approved
+the pinned Python/export environment, and conveys the exact native-build Eigen
+source archive with its MPL notice (`--eigen-source`). Conversion reads only the approved
 English checkpoint with `weights_only=True` inside a network-denied, bounded
 CPU scope and requires the reproducible selected ONNX digest. Installed
 runtime inference loads ONNX only. `tools/stage_diarization_runtime.py` also

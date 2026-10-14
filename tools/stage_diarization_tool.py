@@ -26,6 +26,8 @@ def main():
     p=argparse.ArgumentParser(description=__doc__)
     for name in ('native','python','environment','content','destination'):
         p.add_argument('--'+name,type=Path,required=True)
+    p.add_argument('--eigen-source',type=Path,required=True,
+                   help='exact native-build Eigen source archive conveyed with its MPL notice')
     p.add_argument('--revision',required=True)
     args=p.parse_args()
     inputs=json.loads((ROOT/'native/diarization/export-inputs.json').read_text())
@@ -38,6 +40,9 @@ def main():
         p.error('revision must select this committed product source')
     if subprocess.check_output(['git','-C',str(ROOT),'status','--porcelain']):
         p.error('product source must be clean')
+    eigen=json.loads((ROOT/'native/diarization/inputs.json').read_text())['dependencies']['eigen.tar.gz']
+    if args.eigen_source.stat().st_size!=eigen['bytes'] or sha(args.eigen_source)!=eigen['sha256']:
+        p.error('Eigen source differs from the admitted native-build archive')
     out=args.destination.absolute();out.mkdir(mode=0o700)
     (out/'bin').mkdir();(out/'lib').mkdir()
     # Archive committed packages, not mutable Python import paths.
@@ -57,6 +62,12 @@ def main():
     shutil.copytree(python_root,out/'python',ignore=shutil.ignore_patterns('__pycache__','*.pyc'),symlinks=False)
     shutil.copytree(site,out/'export-packages',ignore=shutil.ignore_patterns('__pycache__','*.pyc'),symlinks=False)
     shutil.copytree(args.native,out/'native')
+    (out/'source').mkdir()
+    shutil.copyfile(args.eigen_source,out/'source/eigen.tar.gz')
+    (out/'source/README.txt').write_text(
+        'The exact Eigen source used by the native runner is provided in eigen.tar.gz.\n'
+        'Its original notices and Mozilla Public License 2.0 are in native/notices/eigen/.\n'
+        'The archive is unmodified; its SHA-256 is '+eigen['sha256']+'.\n')
     source=ROOT/'native/diarization'
     arch=out/'architecture/speakerlab/models/campplus';arch.mkdir(parents=True)
     for name in ('DTDNN.py','layers.py'):shutil.copyfile(source/name,arch/name)
