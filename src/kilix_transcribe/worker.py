@@ -119,6 +119,16 @@ def main() -> None:
         result.update({"engine_revision": ENGINE_COMMIT, "model_revision": model["revision"],
                        "duration_ms": duration_ms, "text": serialize(transcript, "text"),
                        "output_format": args["output"], "output": serialize(transcript, args["output"])})
+        if args['task'] == 'diarize':
+            from kilix_transcribe.diarization import run_diarization
+            selection = request['diarization']
+            annotation = run_diarization(decoded, directory, selection['fds'], selection['manifest'],
+                selection['manifest_sha256'], result, deadline=request['deadline'], guard=guard)
+            result['diarization'] = annotation
+            rendered = json.loads(serialize(transcript, 'json'))
+            rendered['diarization'] = annotation
+            result['output'] = json.dumps(rendered, allow_nan=False, ensure_ascii=False,
+                                         sort_keys=True, separators=(',',':')) + '\n'
         payload = json.dumps(result, allow_nan=False, ensure_ascii=False, separators=(",", ":")).encode()
         if len(payload) > MAX_RESULT_BYTES:
             raise ValueError("result exceeds bound")

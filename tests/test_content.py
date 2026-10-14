@@ -49,9 +49,11 @@ def open_descriptors():
 
 
 class PackagedFixture:
-    def __init__(self, payloads=None, *, asset_id="synthetic-model", revision="revision1", receipt=True):
+    def __init__(self, payloads=None, *, asset_id="synthetic-model", revision="revision1", receipt=True,
+                 consumer_schema=CONSUMER):
         self.payloads = dict(payloads or {"model/model.bin": b"synthetic model bytes"})
         self.asset_id, self.revision, self.with_receipt = asset_id, revision, receipt
+        self.consumer_schema=consumer_schema
 
     def __enter__(self):
         self.stack = ExitStack()
@@ -68,6 +70,7 @@ class PackagedFixture:
                                          for name in sorted(self.payloads)]
             record["source"]["provenance"] = {"original_url": "https://fixture.invalid/model",
                                               "project": "Synthetic test fixture", "revision": self.revision}
+            record['compatibility']['consumer_schema']=self.consumer_schema
             self.spec = content.AssetSpec.from_mapping(record)
             original = receipt._resource_bytes
             document = json.loads(original(receipt._CATALOG_RESOURCE))

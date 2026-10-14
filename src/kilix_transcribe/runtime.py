@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import ctypes
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 import fcntl
 import json
 import os
@@ -79,9 +79,10 @@ def private_directory(path: Path, *, create: bool = False) -> Path:
 
 
 class InstalledRuntime:
-    def __init__(self, root: Path, *, model_source=None):
+    def __init__(self, root: Path, *, model_source=None, diarization_runtime=None):
         self.root = private_directory(root)
         self.model_source = model_source
+        self.diarization_runtime = diarization_runtime
         root_fd, self._directories = self._open_root()
         os.close(root_fd)
         manifest = root / "runtime.json"
@@ -222,7 +223,8 @@ class InstalledRuntime:
                 "engine_id": "whisper.cpp", "engine_revision": ENGINE_COMMIT,
                 "installed": True, "release_qualified": False,
                 "capabilities": ["transcribe", "translate", "language_id", "word_timestamps",
-                                 "unstable_partials", "streaming"]}
+                                 "unstable_partials", "streaming"]
+                                 + (["diarize"] if self.diarization_runtime is not None else [])}
 
 
 def stop_process(process: subprocess.Popen) -> None:
@@ -260,8 +262,14 @@ def _run_owned_job(runtime, audio_fd, args, *, deadline, cancel, disconnected, o
         if time.monotonic() >= deadline:
             raise ProtocolError("DEADLINE_EXCEEDED", "job deadline exceeded")
     runtime.verify_unchanged(check)
+    diarization = getattr(runtime, 'diarization_runtime', None)
     if args["task"] == "diarize":
-        raise ProtocolError("UNSUPPORTED_CAPABILITY", "no diarization profile is installed")
+        if diarization is None:
+            raise ProtocolError("UNSUPPORTED_CAPABILITY", "no diarization profile is installed")
+        if args.get('diarization_session') is not True:
+            raise ProtocolError("INVALID_REQUEST", "diarization requires an explicit session")
+        if args['output'] != 'json' or args.get('stream'):
+            raise ProtocolError("UNSUPPORTED_CAPABILITY", "session diarization requires final JSON output")
     if not 0 < os.fstat(audio_fd).st_size <= MAX_INPUT_BYTES:
         raise ProtocolError("LIMIT_EXCEEDED", "audio exceeds the runtime input bound")
     # File descriptors carry audio; the isolated worker's argv carries no text,
@@ -269,15 +277,20 @@ def _run_owned_job(runtime, audio_fd, args, *, deadline, cancel, disconnected, o
     worker = Path(__file__).with_name("supervisor.py")
     environment = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8",
                    "OMP_NUM_THREADS": "2", "OPENBLAS_NUM_THREADS": "2"}
-    with runtime.snapshots(check) as runtime_fds, tempfile.TemporaryDirectory(prefix="kilix-transcribe-job-") as workspace, tempfile.TemporaryFile() as output:
+    with ExitStack() as stack, runtime.snapshots(check) as runtime_fds, tempfile.TemporaryDirectory(prefix="kilix-transcribe-job-") as workspace, tempfile.TemporaryFile() as output:
         job = {"runtime_fds": runtime_fds, "manifest": runtime.manifest,
                "audio_fd": audio_fd, "args": args,
-               "workspace": workspace}
+               "workspace": workspace, "deadline": deadline}
+        diarization_fds = {}
+        if args['task'] == 'diarize':
+            diarization_fds = stack.enter_context(diarization.snapshots(check))
+            job['diarization'] = {'manifest':diarization.manifest, 'fds':diarization_fds,
+                                 'manifest_sha256':diarization.manifest_sha256}
         process = owner.spawn(
             [sys.executable, "-I", str(worker)], stdin=subprocess.PIPE,
             stdout=subprocess.PIPE if args.get("stream") else output,
             stderr=subprocess.DEVNULL, env=environment,
-            pass_fds=(audio_fd, *runtime_fds.values()), start_new_session=True,
+            pass_fds=(audio_fd, *runtime_fds.values(), *diarization_fds.values()), start_new_session=True,
         )
         try:
             assert process.stdin is not None

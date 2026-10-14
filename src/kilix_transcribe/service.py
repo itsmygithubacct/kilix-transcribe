@@ -382,7 +382,12 @@ def client_request(directory: Path, value: dict, descriptor: int | None = None, 
                     if select.select([channel], [], [], min(0.05, remaining))[0]:
                         break
             channel.settimeout(remaining)
-            event, descriptors = receive_packet(channel)
+            try:
+                event, descriptors = receive_packet(channel)
+            except ProtocolError as error:
+                if error.code == 'TRANSPORT_ERROR' and time.monotonic() >= deadline:
+                    raise ProtocolError('DEADLINE_EXCEEDED','provider receive deadline exceeded') from error
+                raise
             try:
                 if (event.get("schema") != PROTOCOL_SCHEMA
                         or event.get("request_id") != value["request_id"]

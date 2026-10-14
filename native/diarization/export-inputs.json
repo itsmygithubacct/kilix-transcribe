@@ -1,0 +1,28 @@
+{
+  "schema": "kilix.transcribe.diarization-export/v1",
+  "python": "3.12.8",
+  "architecture": {
+    "origin": "https://github.com/modelscope/3D-Speaker.git",
+    "commit": "065629c313eaf1a01c65c640c46d77e61e9607b4",
+    "tree": "fc152f91be157ef32cc52009b4e147dccbcf2a6a",
+    "archive_sha256": "bedc11a2b62f04c793ada5148475014c1b5904b65454d406a1aab7c1fc56b975",
+    "archive_kind": "complete-tracked-tree",
+    "licence_sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+  },
+  "source_files": {
+    "DTDNN.py": "52272359361ef9f03a8b4198f50139301ce712833e777396940a5b437177cd34",
+    "layers.py": "b3d28ad94d14b30fcd20c96d1d83516d4e44de733959460b358e90d97476adb8"
+  },
+  "checkpoint": {
+    "revision": "032b8131a7ad812f87061955ca974c99060c5a03",
+    "bytes": 29357703,
+    "sha256": "5b1a88b6f8d85826fabef804779c3372b42f3af21457fa48bd5c097c0686b2de"
+  },
+  "output": {
+    "bytes": 29539501,
+    "sha256": "7cfea971b2231ed7d7dd6324de1de33f8f9dbe65bbb30cf64b4b0b203b566292"
+  },
+  "wheel_manifest_sha256": "68ff8164449070b3888dcf1aac9eb6120917687e9b2ccece5be9a6c8f7220a3b",
+  "export_memory_bytes": 2147483648,
+  "export_timeout_seconds": 600
+}

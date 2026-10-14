@@ -66,10 +66,31 @@ Its digest-bound `kilix.transcribe.runtime/v1` manifest is not an F100 install
 authority or license receipt. Production asset admission, F106 binding,
 resource admission, GPU profiles and combined corpus/soak qualification
 remain open. Incremental recognition has a development implementation;
-physical/model qualification, neural VAD and diarization remain open. The managed
+physical/model qualification and neural VAD remain open. The managed
 recording and optional legacy energy detector below are development paths.
-Unsupported diarization refuses explicitly. Commands that
+Speaker turns require the separate exact runtime and an explicit session. Commands that
 need an unstaged runtime retain `RUNTIME_UNSELECTED` and exit 69.
+
+The CPU speaker-turn route uses pinned pyannote 3.0 segmentation and a locally
+exported English CAM++ graph. Select the receipt-covered `kilix-diarization-cpu`
+asset with `serve --diarization-runtime PATH --diarization-asset
+kilix-diarization-cpu`, alongside the installed Tiny selection. Each request
+must use `file INPUT --task diarize --diarization-session --format json`.
+Speaker turns form a separate annotation bound to the unchanged recognized
+words/timestamps. Anonymous labels are new for every request; no embedding or
+speaker identity is retained. Unidentifiable activity remains explicit.
+Streaming diarization is refused; transcript streaming remains available for
+ordinary transcription/translation. These checks do not claim a qualified
+speaker-accuracy or sustained-load profile.
+
+`tools/build_diarization_native.py` builds the CPU runner from exact local
+software archives without fetching. `tools/stage_diarization_tool.py` creates
+the optional receipt-gated conversion tool from committed product source and
+the pinned Python/export environment. Conversion reads only the approved
+English checkpoint with `weights_only=True` inside a network-denied, bounded
+CPU scope and requires the reproducible selected ONNX digest. Installed
+runtime inference loads ONNX only. `tools/stage_diarization_runtime.py` also
+supports explicit local development staging; it never creates a model receipt.
 
 The existing design ledger in `design/transcribe-candidate-v1.json` preserves
 48 requirements, eight accepted source candidates and four unselected release

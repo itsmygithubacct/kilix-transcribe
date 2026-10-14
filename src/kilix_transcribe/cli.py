@@ -64,6 +64,8 @@ def parser() -> argparse.ArgumentParser:
             subparser.add_argument("--model-snapshot-bytes", type=int)
             subparser.add_argument("--lease-device")
             subparser.add_argument("--lease-namespace")
+            subparser.add_argument("--diarization-runtime", type=Path)
+            subparser.add_argument("--diarization-asset")
         elif command in {"file", "record"}:
             if command == "file":
                 subparser.add_argument("input", type=Path, nargs="?")
@@ -76,6 +78,8 @@ def parser() -> argparse.ArgumentParser:
             subparser.add_argument("--format", choices=("text", "json", "webvtt", "srt"), default="text")
             subparser.add_argument("--language")
             subparser.add_argument("--task", choices=("transcribe", "translate", "diarize"), default="transcribe")
+            subparser.add_argument("--diarization-session", action="store_true",
+                                   help="allow anonymous speaker turns for this explicit JSON request")
             subparser.add_argument("--timeout", type=float, default=300)
             subparser.add_argument("--stream", action="store_true",
                                    help="show provisional transcript revisions on stderr during recognition")
@@ -104,7 +108,24 @@ def main(argv: Sequence[str] | None = None) -> int:
                                         consumer_schema="kilix.transcribe.runtime")
         if arguments.command == "serve" and arguments.runtime_root is not None:
             with model_source if model_source is not None else nullcontext():
-                runtime = InstalledRuntime(arguments.runtime_root, model_source=model_source)
+                diarization = None
+                if arguments.diarization_runtime is not None:
+                    from .diarization import DiarizationRuntime
+                    from .content import InstalledModel
+                    if model_source is not None and arguments.diarization_asset is None:
+                        raise ProtocolError('INVALID_RUNTIME','managed diarization requires its own installed asset')
+                    source = None
+                    if arguments.diarization_asset is not None:
+                        source = InstalledModel(arguments.diarization_asset, arguments.content_root,
+                            maximum_bytes=512*1024**2, provider='kilix-transcribe',
+                            consumer_schema='kilix.transcribe.diarization-runtime')
+                    diarization = DiarizationRuntime(arguments.diarization_runtime, model_source=source)
+                    if source is not None:
+                        with source.open(lambda: None): pass
+                elif arguments.diarization_asset is not None:
+                    raise ProtocolError('INVALID_RUNTIME','select a diarization runtime with its installed asset')
+                runtime = InstalledRuntime(arguments.runtime_root, model_source=model_source,
+                                           diarization_runtime=diarization)
                 if model_source is not None:
                     # Refuse missing consent or damaged installed bytes before
                     # publishing a socket. Each job still rechecks its model.
@@ -132,6 +153,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     output=arguments.format, timeout=arguments.timeout, cancelled=cancellation.is_set,
                     disconnected=lambda: receiver_closed(sys.stdout.fileno()), vad=arguments.vad,
                     on_update=show_update if arguments.stream else None,
+                    diarization_session=arguments.diarization_session,
                     config={"audio": {"device_in": arguments.device}})
                 print(payload["output"], end="")
             finally:
@@ -168,6 +190,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "output": arguments.format, "audio_fd": 0,
                         "audio": {"byte_length": info.st_size, "sha256": digest.hexdigest(),
                                   "media_type": media_type}}
+                if arguments.diarization_session:
+                    args['diarization_session'] = True
                 if arguments.stream:
                     negotiate_stream(runtime_directory(), timeout=min(1, arguments.timeout))
                     args["stream"] = STREAM_FEATURE
