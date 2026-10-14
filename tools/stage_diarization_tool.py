@@ -78,5 +78,11 @@ def main():
     launcher=(ROOT/'tools/diarization_convert.py').read_text().replace('@TOOL_SHA256@',hashlib.sha256(data).hexdigest())
     (out/'bin/kilix-diarization-convert').write_text(launcher)
     (out/'bin/kilix-diarization-convert').chmod(0o755)
+    # This is public software for an image carrier, with no weights, receipts
+    # or user state. Installed root ownership must still allow desktop use.
+    for path in out.rglob('*'):
+        if path.is_dir():path.chmod(0o755)
+        elif path.is_file():path.chmod(0o755 if path.stat().st_mode&0o111 else 0o644)
+    out.chmod(0o755)
     print('Staged software only; models require the packaged first-use agreement.')
 if __name__=='__main__':main()
