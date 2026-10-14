@@ -65,7 +65,7 @@ def main() -> None:
         directory = Path(temporary)
         decoded = directory / "audio.wav"
         decoder_fd = runtime_fds["ffmpeg"]
-        _run([f"/proc/self/fd/{decoder_fd}", "-nostdin", "-v", "error", "-protocol_whitelist", "file,pipe",
+        _run([f"/proc/self/fd/{decoder_fd}", "-nostdin", "-v", "error", "-xerror", "-protocol_whitelist", "file,pipe",
               "-f", demuxer, "-i", f"/proc/self/fd/{audio_fd}", "-map", "0:a:0",
               "-vn", "-sn", "-dn", "-t", str(MAX_AUDIO_SECONDS + 1), "-ac", "1",
               "-ar", "16000", "-c:a", "pcm_s16le", "-f", "wav", str(decoded)],
