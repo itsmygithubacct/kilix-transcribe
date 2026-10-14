@@ -15,7 +15,7 @@ from kilix_transcribe.owned import OwnedExecution
 from kilix_transcribe.protocol import ProtocolError, receive_packet
 from kilix_transcribe.service import client_request, request_value
 from test_leased_runtime import prepared, raw, waiting, until
-from voicelib import device_leases
+import kilix_device_lease as device_leases
 
 
 def children(pid):

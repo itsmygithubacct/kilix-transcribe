@@ -18,9 +18,10 @@ from kilix_transcribe.service import client_request, request_value
 
 try:
     from voicelib.audio import MicCapture
+    from voicelib.managed_audio import ManagedMicCapture
     from voicelib.microphone import CaptureControl
 except ImportError:
-    MicCapture = CaptureControl = None
+    MicCapture = ManagedMicCapture = CaptureControl = None
 
 
 @contextmanager
@@ -141,11 +142,11 @@ class RecordingTests(unittest.TestCase):
                 record_and_transcribe(fixture.ipc, **self.options(), task="diarize", timeout=5)
             self.assertEqual(error.exception.code, "UNSUPPORTED_CAPABILITY")
             self.assertEqual(self.phases, [])
-            original_stop = MicCapture.stop
+            original_stop = ManagedMicCapture.stop
             def unproved(capture):
                 original_stop(capture)
                 return False
-            with patch.object(MicCapture, "stop", unproved), self.assertRaises(ProtocolError) as error:
+            with patch.object(ManagedMicCapture, "stop", unproved), self.assertRaises(ProtocolError) as error:
                 record_and_transcribe(fixture.ipc, **self.options(), timeout=5)
             self.assertEqual(error.exception.code, "SUPERVISOR_FAILED")
             self.assertFalse((fixture.installation / "engine.pid").exists())
@@ -177,7 +178,7 @@ class RecordingTests(unittest.TestCase):
             # the consumer begins, using a file written only after all PCM.
             marker = self.root / "all-written"
             source = f"import os;from pathlib import Path;os.write(1,b'\\1\\0'*320*800);Path({str(marker)!r}).touch()"
-            original = MicCapture.start
+            original = ManagedMicCapture.start
             def start(capture):
                 original(capture)
                 until = time.monotonic() + 2
@@ -185,7 +186,7 @@ class RecordingTests(unittest.TestCase):
                     time.sleep(.005)
                 self.assertTrue(marker.exists())
                 self.assertGreater(capture.overruns, 0)
-            with patch.object(MicCapture, "start", start), self.assertRaises(ProtocolError):
+            with patch.object(ManagedMicCapture, "start", start), self.assertRaises(ProtocolError):
                 record_and_transcribe(fixture.ipc, **self.options(source), timeout=5)
             self.assertFalse((fixture.installation / "engine.pid").exists())
 

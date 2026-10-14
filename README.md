@@ -140,7 +140,9 @@ or hardware-profile acceptance.
 ### Shared execution coordination
 
 `serve --lease-device cpu-development` explicitly selects the optional
-`voicelib.device_leases` v1 API. The same private default namespace coordinates
+`kilix_device_lease` v1 API from the `kilix-device-lease` distribution in
+`kilix-system-monitor`. Install that distribution into the provider's
+interpreter before selecting the policy. The same private default namespace coordinates
 all participating providers; `--lease-namespace` selects a shared private
 absolute namespace for isolated deployments or tests. A namespace requires a
 device label. Selecting this policy requires the API to be installed and never
