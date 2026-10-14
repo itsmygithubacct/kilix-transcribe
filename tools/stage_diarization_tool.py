@@ -16,12 +16,24 @@ import io
 ROOT=Path(__file__).resolve().parents[1]
 def sha(path):
     with path.open('rb') as f:return hashlib.file_digest(f,'sha256').hexdigest()
+def population(root):
+    digest=hashlib.sha256()
+    for path in sorted(root.rglob('*')):
+        if '__pycache__' in path.parts or path.suffix=='.pyc' or not path.is_file():continue
+        digest.update(str(path.relative_to(root)).encode()+b'\0'+bytes.fromhex(sha(path)))
+    return digest.hexdigest()
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     for name in ('native','python','environment','content','destination'):
         p.add_argument('--'+name,type=Path,required=True)
     p.add_argument('--revision',required=True)
     args=p.parse_args()
+    inputs=json.loads((ROOT/'native/diarization/export-inputs.json').read_text())
+    python_root=args.python.resolve().parent.parent
+    site=args.environment/'lib/python3.12/site-packages'
+    if (population(python_root)!=inputs['python_population_sha256']
+            or population(site)!=inputs['export_packages_population_sha256']):
+        p.error('software differs from the exact admitted Python/export population')
     if subprocess.check_output(['git','-C',str(ROOT),'rev-parse','HEAD']).decode().strip()!=args.revision:
         p.error('revision must select this committed product source')
     if subprocess.check_output(['git','-C',str(ROOT),'status','--porcelain']):
@@ -42,9 +54,7 @@ def main():
     content_ref=subprocess.check_output(['git','-C',str(args.content),'rev-parse','HEAD']).decode().strip()
     package(args.content,content_ref,'src/kilix_content',out/'lib/kilix_content')
     package(args.content,content_ref,'third_party/kilix-license/src/kilix_license',out/'lib/kilix_license')
-    python_root=args.python.resolve().parent.parent
     shutil.copytree(python_root,out/'python',ignore=shutil.ignore_patterns('__pycache__','*.pyc'),symlinks=False)
-    site=args.environment/'lib/python3.12/site-packages'
     shutil.copytree(site,out/'export-packages',ignore=shutil.ignore_patterns('__pycache__','*.pyc'),symlinks=False)
     shutil.copytree(args.native,out/'native')
     source=ROOT/'native/diarization'

@@ -24,5 +24,7 @@
   },
   "wheel_manifest_sha256": "68ff8164449070b3888dcf1aac9eb6120917687e9b2ccece5be9a6c8f7220a3b",
   "export_memory_bytes": 2147483648,
-  "export_timeout_seconds": 600
+  "export_timeout_seconds": 600,
+  "python_population_sha256": "2c2ab698cd9776fd2e6bf95efecfeb1285bdfa6244544f3d02adc7521884721c",
+  "export_packages_population_sha256": "7974a2cb7049c771dce866bcbbadc85d3065cf8dc5c267eb1b329aa83e91083b"
 }
