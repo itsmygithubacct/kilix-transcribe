@@ -92,6 +92,9 @@ English checkpoint with `weights_only=True` inside a network-denied, bounded
 CPU scope and requires the reproducible selected ONNX digest. Installed
 runtime inference loads ONNX only. `tools/stage_diarization_runtime.py` also
 supports explicit local development staging; it never creates a model receipt.
+The software bundle includes the matching Python dependency notices and source
+information. Its Torch and NumPy libraries use Debian's `libgomp1`, `libgfortran5`
+and `libquadmath0` packages; the bundle omits those GCC runtime libraries.
 
 The existing design ledger in `design/transcribe-candidate-v1.json` preserves
 48 requirements, eight accepted source candidates and four unselected release

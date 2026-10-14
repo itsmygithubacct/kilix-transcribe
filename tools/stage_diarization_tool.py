@@ -4,6 +4,7 @@
 No model is copied. The installed CPU runtime does not include this exporter.
 """
 import argparse
+import ast
 import hashlib
 import json
 from pathlib import Path
@@ -31,7 +32,7 @@ def main():
     p.add_argument('--python-full-archive',type=Path,required=True,
                    help='official matching standalone archive containing dependency notices')
     p.add_argument('--patchelf',type=Path,required=True,
-                   help='pinned build tool for selecting the distro OpenMP runtime')
+                   help='pinned build tool for selecting the distro GCC runtimes')
     p.add_argument('--revision',required=True)
     args=p.parse_args()
     inputs=json.loads((ROOT/'native/diarization/export-inputs.json').read_text())
@@ -74,8 +75,15 @@ def main():
     # prefix from this relocated interpreter; never convey the builder home.
     for path in (out/'python').rglob('_sysconfigdata*.py'):
         text=path.read_text()
-        if str(python_root) in text:
-            text=text.replace(str(python_root),'@KILIX_PYTHON_PREFIX@')
+        tree=ast.parse(text)
+        variables=next(ast.literal_eval(node.value) for node in tree.body
+            if isinstance(node,ast.Assign) and any(isinstance(target,ast.Name)
+            and target.id=='build_time_vars' for target in node.targets))
+        # An exact admitted interpreter can itself be a retained relocated
+        # copy. Its metadata still names the original installation prefix.
+        original_prefix=variables['prefix']
+        if original_prefix in text:
+            text=text.replace(original_prefix,'@KILIX_PYTHON_PREFIX@')
             text+=('\nimport os as _kilix_os\n'
                 '_kilix_prefix = _kilix_os.path.dirname(_kilix_os.path.dirname(_kilix_os.path.dirname(__file__)))\n'
                 'for _kilix_key, _kilix_value in list(build_time_vars.items()):\n'
@@ -87,8 +95,8 @@ def main():
     # by the exact locked wheel URLs and digests in export-wheels.json.
     shutil.copytree(site,out/'export-packages',
         ignore=shutil.ignore_patterns('__pycache__','*.pyc','direct_url.json'),symlinks=False)
-    # Do not redistribute an opaque GCC runtime without its corresponding
-    # source. Select Debian's libgomp1 by SONAME, changing no executable code.
+    # Select distro GCC runtimes by SONAME rather than redistributing opaque
+    # bundled libraries without their corresponding source.
     gomp='libgomp-25c89faf.so.1'
     torch_lib=out/'export-packages/torch/lib'
     for name in ('libshm.so','libtorch_cpu.so','libtorch_global_deps.so'):
@@ -97,6 +105,15 @@ def main():
         if needed.count(gomp)!=1:p.error('unexpected Torch OpenMP dependency')
         subprocess.run([args.patchelf,'--replace-needed',gomp,'libgomp.so.1',path],check=True)
     (torch_lib/gomp).unlink()
+    numpy_lib=out/'export-packages/numpy.libs'
+    gfortran='libgfortran-040039e1-0352e75f.so.5.0.0'
+    quadmath='libquadmath-96973f99-934c22de.so.0.0.0'
+    openblas=numpy_lib/'libscipy_openblas64_-56d6093b.so'
+    needed=subprocess.check_output([args.patchelf,'--print-needed',openblas]).decode().splitlines()
+    if needed.count(gfortran)!=1:p.error('unexpected NumPy Fortran dependency')
+    subprocess.run([args.patchelf,'--replace-needed',gfortran,'libgfortran.so.5',openblas],check=True)
+    (numpy_lib/gfortran).unlink()
+    (numpy_lib/quadmath).unlink()
     shutil.copytree(args.native,out/'native')
     (out/'source').mkdir()
     shutil.copyfile(args.eigen_source,out/'source/eigen.tar.gz')
@@ -132,12 +149,15 @@ def main():
     finally:
         child.stdout.close()
         if child.wait():raise ValueError('Python notice archive failed')
-    (out/'notices/OPENMP-DEPENDENCY.txt').write_text(
-        'Torch 2.7.0+cpu comes from the exact wheels in export-wheels.json.\n'
+    (out/'notices/GCC-RUNTIME-DEPENDENCIES.txt').write_text(
+        'Torch 2.7.0+cpu and NumPy 2.2.6 come from the exact wheels in export-wheels.json.\n'
         'Only DT_NEEDED references in libshm.so, libtorch_cpu.so and libtorch_global_deps.so\n'
         'are changed from the bundled libgomp-25c89faf.so.1 to system libgomp.so.1.\n'
-        'The bundled GCC runtime is omitted. Install Debian libgomp1; no compiler/runtime\n'
-        'source from that package is redistributed by this software archive.\n')
+        'The NumPy OpenBLAS DT_NEEDED reference is changed from bundled\n'
+        'libgfortran-040039e1-0352e75f.so.5.0.0 to system libgfortran.so.5.\n'
+        'The bundled libgomp, libgfortran and libquadmath libraries are omitted.\n'
+        'Install Debian libgomp1, libgfortran5 and libquadmath0; no compiler/runtime\n'
+        'source from those packages is redistributed by this software archive.\n')
     (out/'notices/SOURCE-AVAILABILITY.txt').write_text(
         'Converter source and changes: https://github.com/itsmygithubacct/kilix-transcribe/tree/'+args.revision+'\n'
         'CPython 3.12.8 source: https://www.python.org/ftp/python/3.12.8/Python-3.12.8.tar.xz\n'
