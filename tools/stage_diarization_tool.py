@@ -60,7 +60,11 @@ def main():
     package(args.content,content_ref,'src/kilix_content',out/'lib/kilix_content')
     package(args.content,content_ref,'third_party/kilix-license/src/kilix_license',out/'lib/kilix_license')
     shutil.copytree(python_root,out/'python',ignore=shutil.ignore_patterns('__pycache__','*.pyc'),symlinks=False)
-    shutil.copytree(site,out/'export-packages',ignore=shutil.ignore_patterns('__pycache__','*.pyc'),symlinks=False)
+    # Installed-wheel acquisition metadata names the builder's local cache.
+    # Runtime/version/licence metadata remains; public provenance is conveyed
+    # by the exact locked wheel URLs and digests in export-wheels.json.
+    shutil.copytree(site,out/'export-packages',
+        ignore=shutil.ignore_patterns('__pycache__','*.pyc','direct_url.json'),symlinks=False)
     shutil.copytree(args.native,out/'native')
     (out/'source').mkdir()
     shutil.copyfile(args.eigen_source,out/'source/eigen.tar.gz')
