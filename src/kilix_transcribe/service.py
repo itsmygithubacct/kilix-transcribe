@@ -21,6 +21,7 @@ from .protocol import (
 )
 from .runtime import InstalledRuntime, MAX_INPUT_BYTES, MAX_RESULT_BYTES, private_directory, run_job
 from .results import decode_result
+from .streaming import STREAM_FEATURE, STREAM_LIMITS, MAX_UPDATES, SEND_TIMEOUT, SegmentStream
 
 SOCKET_NAME = "kilix-transcribe.sock"
 
@@ -182,6 +183,8 @@ class Service:
             descriptors = ()
             if request.operation == "hello":
                 result = {"protocol_major": 1, "protocol_minor": 0}
+                if "features" in request.arguments:
+                    result.update(protocol_minor=1, features=[STREAM_FEATURE], limits=STREAM_LIMITS)
                 kind = "hello"
             elif request.operation == "models":
                 result = {"models": [self.runtime.model_record()]}
@@ -212,21 +215,41 @@ class Service:
                 result = {"loaded": False}
                 kind = "unloaded"
             else:
-                channel.settimeout(max(0.001, deadline - time.monotonic()))
-                send_packet(channel, _reply(request, "accepted", {}))
+                streaming = request.arguments.get("stream") == STREAM_FEATURE
+                remaining = max(0.001, deadline - time.monotonic())
+                channel.settimeout(min(SEND_TIMEOUT, remaining) if streaming else remaining)
+                send_packet(channel, _reply(request, "accepted", {"stream": STREAM_FEATURE,
+                    "limits": STREAM_LIMITS} if streaming else {}))
                 def queued(status):
-                    channel.settimeout(max(0.001, deadline - time.monotonic()))
+                    remaining = max(0.001, deadline - time.monotonic())
+                    channel.settimeout(min(SEND_TIMEOUT, remaining) if streaming else remaining)
                     send_packet(channel, _reply(request, "queued", {
                         "state": status.state, "position": status.position,
                         "lease_version": status.version}))
+                def update(value):
+                    if cancellation.is_set() or self.stopping.is_set() or _closed(channel):
+                        raise ProtocolError("CANCELED", "consumer stopped before update delivery")
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise ProtocolError("DEADLINE_EXCEEDED", "update delivery deadline exceeded")
+                    channel.settimeout(min(SEND_TIMEOUT, remaining))
+                    try:
+                        send_packet(channel, _reply(request, "update", value))
+                    except ProtocolError as error:
+                        if cancellation.is_set() or self.stopping.is_set() or _closed(channel):
+                            raise ProtocolError("CANCELED", "consumer stopped during update delivery") from error
+                        raise ProtocolError("SLOW_CONSUMER", "consumer cannot accept bounded updates") from error
                 result = run_job(self.runtime, snapshot, request.arguments,
                                  deadline=deadline, cancel=cancellation,
                                  execution_policy=self.execution_policy, job_id=request.job_id, progress=queued,
+                                 updates=update if streaming else None,
                                  disconnected=lambda: self.stopping.is_set() or _closed(channel))
                 # Long transcripts use the same bounded descriptor mechanism
                 # as audio. No transcript is retained after the connection.
                 payload = json.dumps(result, allow_nan=False, ensure_ascii=False,
                                      separators=(",", ":"), sort_keys=True).encode()
+                if streaming:
+                    channel.settimeout(min(SEND_TIMEOUT, max(0.001, deadline - time.monotonic())))
                 with tempfile.TemporaryFile() as writer:
                     writer.write(payload)
                     writer.flush()
@@ -275,8 +298,27 @@ def request_value(operation: str, *, job_id: str | None = None,
     return value
 
 
-def client_request(directory: Path, value: dict, descriptor: int | None = None, *, cancelled=None) -> dict:
+def negotiate_stream(directory: Path, *, timeout=1):
+    """Refuse an older peer before handing it a descriptor for streaming."""
+    try:
+        response = client_request(directory, request_value("hello", timeout=timeout, args={
+            "protocol_major": 1, "protocol_minor": 1, "features": [STREAM_FEATURE]}))
+    except ProtocolError as error:
+        if error.code in {"INVALID_REQUEST", "INCOMPATIBLE_PROTOCOL"}:
+            raise ProtocolError("INCOMPATIBLE_PROTOCOL", "peer does not support transcript streaming") from error
+        raise
+    if (response != {"protocol_major": 1, "protocol_minor": 1,
+                     "features": [STREAM_FEATURE], "limits": STREAM_LIMITS}
+            or any(type(response.get(name)) is not int for name in ("protocol_major", "protocol_minor"))):
+        raise ProtocolError("INCOMPATIBLE_PROTOCOL", "peer does not support the bounded streaming feature")
+    return response
+
+
+def client_request(directory: Path, value: dict, descriptor: int | None = None, *, cancelled=None, on_update=None) -> dict:
     ProviderRequest.from_payload(value)
+    streaming = value["args"].get("stream") == STREAM_FEATURE
+    if on_update is not None and (not callable(on_update) or value["op"] != "submit" or not streaming):
+        raise ProtocolError("INVALID_REQUEST", "update callback requires a negotiated streaming submit")
     if cancelled is not None and (not callable(cancelled) or value['op'] != 'submit'):
         raise ProtocolError('INVALID_REQUEST', 'cancellation callback requires a submit request')
 
@@ -296,6 +338,8 @@ def client_request(directory: Path, value: dict, descriptor: int | None = None, 
     if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o177:
         raise ProtocolError("UNAUTHORIZED_PEER", "unsafe provider endpoint")
     deadline = time.monotonic() + value["deadline_ms"] / 1000
+    state = SegmentStream(value["args"]["task"]) if streaming else None
+    accepted = False
     with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as channel:
         remaining = max(0.001, deadline - time.monotonic())
         channel.settimeout(min(0.2, remaining) if cancelled is not None else remaining)
@@ -313,7 +357,7 @@ def client_request(directory: Path, value: dict, descriptor: int | None = None, 
             raise ProtocolError("DEADLINE_EXCEEDED", "provider deadline exceeded before submission")
         channel.settimeout(min(0.2, remaining) if cancelled is not None else remaining)
         send_packet(channel, value, descriptor)
-        for _ in range(256):
+        for _ in range(MAX_UPDATES + 256 if streaming else 256):
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise ProtocolError("DEADLINE_EXCEEDED", "provider deadline exceeded")
@@ -355,9 +399,24 @@ def client_request(directory: Path, value: dict, descriptor: int | None = None, 
                             or any(c not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_" for c in code)):
                         code = "PROVIDER_ERROR"
                     raise ProtocolError(code, "provider refused the request")
+                if event["type"] == "update":
+                    if not streaming or not accepted or descriptors:
+                        raise ProtocolError("INVALID_RESPONSE", "unnegotiated transcript update")
+                    update = state.apply(event.get("result"))
+                    if cancellation_requested():
+                        raise ProtocolError("CANCELED", "job canceled before update delivery")
+                    if time.monotonic() >= deadline:
+                        raise ProtocolError("DEADLINE_EXCEEDED", "update delivery deadline exceeded")
+                    if on_update is not None:
+                        on_update(update)
+                    continue
                 if event.get("type") in {"accepted", "queued", "loading", "progress"}:
                     if descriptors or value["op"] != "submit":
                         raise ProtocolError("DESCRIPTOR_MISMATCH", "unexpected progress descriptor")
+                    if streaming and event["type"] == "accepted":
+                        if accepted or event.get("result") != {"stream": STREAM_FEATURE, "limits": STREAM_LIMITS}:
+                            raise ProtocolError("INCOMPATIBLE_PROTOCOL", "peer did not acknowledge streaming")
+                        accepted = True
                     continue
                 result = event.get("result")
                 if type(result) is not dict:
@@ -387,6 +446,10 @@ def client_request(directory: Path, value: dict, descriptor: int | None = None, 
                     if len(payload) != info.st_size or hashlib.sha256(payload).hexdigest() != metadata["sha256"]:
                         raise ProtocolError("DESCRIPTOR_MISMATCH", "transcript digest mismatch")
                     decoded = decode_result(payload, result, value["args"])
+                    if streaming:
+                        if not accepted:
+                            raise ProtocolError("INCOMPATIBLE_PROTOCOL", "missing streaming acceptance")
+                        state.finish(decoded)
                     if cancellation_requested():
                         raise ProtocolError("CANCELED", "job canceled before delivery")
                     if time.monotonic() >= deadline:

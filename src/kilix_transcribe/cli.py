@@ -5,10 +5,12 @@ from __future__ import annotations
 import argparse
 from contextlib import nullcontext
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
 import signal
+import time
 import sys
 import uuid
 from collections.abc import Sequence
@@ -17,8 +19,41 @@ from .surface import COMMANDS, RuntimeUnselected, SurfaceError, inspect_command
 from .protocol import ProtocolError
 
 
+def _stderr_write(text: str, *, required: bool = False) -> None:
+    """Deliver bounded previews without changing a borrowed descriptor's flags."""
+    from .diagnostic_writer import deliver
+    from .streaming import SEND_TIMEOUT
+
+    delivered = False
+    expires = time.monotonic() + SEND_TIMEOUT
+    try:
+        data = text.encode("utf-8", errors="replace")
+        if len(data) > 131_072:
+            raise ProtocolError("LIMIT_EXCEEDED", "diagnostic exceeds its bound")
+        if isinstance(sys.stderr, io.StringIO):
+            sys.stderr.write(text)
+            return
+        descriptor = sys.stderr.fileno()
+        if type(descriptor) is not int:
+            raise TypeError("unusable diagnostic descriptor")
+        delivered = deliver(descriptor, data, expires)
+    except (AttributeError, OSError, TypeError, ValueError, ProtocolError):
+        pass
+    if required and not delivered:
+        raise ProtocolError("SLOW_CONSUMER", "transcript preview receiver is blocked or closed")
+
+
+class _ArgumentParser(argparse.ArgumentParser):
+    def _print_message(self, message, file=None):
+        if file is sys.stderr:
+            if message:
+                _stderr_write(message)
+        else:
+            super()._print_message(message, file)
+
+
 def parser() -> argparse.ArgumentParser:
-    candidate = argparse.ArgumentParser(prog="kilix-transcribe")
+    candidate = _ArgumentParser(prog="kilix-transcribe")
     commands = candidate.add_subparsers(dest="command", required=True)
     for command in COMMANDS:
         subparser = commands.add_parser(command)
@@ -42,6 +77,8 @@ def parser() -> argparse.ArgumentParser:
             subparser.add_argument("--language")
             subparser.add_argument("--task", choices=("transcribe", "translate", "diarize"), default="transcribe")
             subparser.add_argument("--timeout", type=float, default=300)
+            subparser.add_argument("--stream", action="store_true",
+                                   help="show provisional transcript revisions on stderr during recognition")
         elif command == "cancel":
             subparser.add_argument("job_id", nargs="?")
     return candidate
@@ -51,7 +88,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     arguments = parser().parse_args(argv)
     try:
         from .runtime import InstalledRuntime, MAX_INPUT_BYTES
-        from .service import Service, client_request, request_value, runtime_directory
+        from .service import Service, client_request, request_value, runtime_directory, negotiate_stream
+        from .streaming import STREAM_FEATURE
+        def show_update(update):
+            from .surface import _segment_payload
+            _stderr_write("KILIX_TRANSCRIBE_UPDATE " + json.dumps(_segment_payload(update),
+                ensure_ascii=False, separators=(",", ":")) + "\n", required=True)
         if arguments.command == "serve":
             from .owned import from_options as execution_options
             execution_policy = execution_options(arguments)
@@ -83,12 +125,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             indication_lock = threading.Lock()
             def indicate(phase):
                 with indication_lock:
-                    print("KILIX_MICROPHONE " + phase, file=sys.stderr, flush=True)
+                    _stderr_write("KILIX_MICROPHONE " + phase + "\n")
             try:
                 payload = record_and_transcribe(runtime_directory(), seconds=arguments.seconds,
                     indicator=indicate, task=arguments.task, language=arguments.language,
                     output=arguments.format, timeout=arguments.timeout, cancelled=cancellation.is_set,
                     disconnected=lambda: receiver_closed(sys.stdout.fileno()), vad=arguments.vad,
+                    on_update=show_update if arguments.stream else None,
                     config={"audio": {"device_in": arguments.device}})
                 print(payload["output"], end="")
             finally:
@@ -96,6 +139,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     signal.signal(sig, handler)
             return 0
         if arguments.command == "file" and arguments.input is not None:
+            started = time.monotonic()
             descriptor = os.open(arguments.input, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC)
             try:
                 info = os.fstat(descriptor)
@@ -124,9 +168,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "output": arguments.format, "audio_fd": 0,
                         "audio": {"byte_length": info.st_size, "sha256": digest.hexdigest(),
                                   "media_type": media_type}}
+                if arguments.stream:
+                    negotiate_stream(runtime_directory(), timeout=min(1, arguments.timeout))
+                    args["stream"] = STREAM_FEATURE
+                remaining = arguments.timeout - (time.monotonic() - started)
+                if remaining <= 0:
+                    raise ProtocolError("DEADLINE_EXCEEDED", "file job deadline expired")
                 value = request_value("submit", job_id=uuid.uuid4().hex,
-                                      args=args, timeout=arguments.timeout)
-                payload = client_request(runtime_directory(), value, descriptor)
+                                      args=args, timeout=remaining)
+                payload = client_request(runtime_directory(), value, descriptor,
+                                         on_update=show_update if arguments.stream else None)
                 print(payload["output"], end="")
                 return 0
             finally:
@@ -146,14 +197,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             payload = inspect_command(arguments.command)
     except RuntimeUnselected as error:
-        print(str(error), file=sys.stderr)
+        _stderr_write(str(error) + "\n")
         return 69
     except SurfaceError as error:
-        print(f"KILIX_TRANSCRIBE_REFUSAL [{error.code}] {error}", file=sys.stderr)
+        _stderr_write(f"KILIX_TRANSCRIBE_REFUSAL [{error.code}] {error}\n")
         return 64
     except (ProtocolError, OSError, ValueError, OverflowError) as error:
         code = error.code if isinstance(error, ProtocolError) else "PROVIDER_UNAVAILABLE"
-        print(f"KILIX_TRANSCRIBE_REFUSAL [{code}] {error}", file=sys.stderr)
+        _stderr_write(f"KILIX_TRANSCRIBE_REFUSAL [{code}] {error}\n")
         return 69
     print(json.dumps(payload, separators=(",", ":"), sort_keys=True))
     return 0

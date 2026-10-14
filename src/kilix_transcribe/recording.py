@@ -172,9 +172,10 @@ def receiver_closed(descriptor):
 
 def record_and_transcribe(directory: Path, *, seconds, indicator, task="transcribe", language=None,
                           output="text", timeout=300, cancelled=None, disconnected=None, locked=None,
-                          namespace=None, config=None, vad=False):
+                          namespace=None, config=None, vad=False, on_update=None):
     """One explicit capture and one bound provider job; no persistent audio."""
-    from .service import client_request, request_value
+    from .service import client_request, request_value, negotiate_stream
+    from .streaming import STREAM_FEATURE
     import hashlib
     seconds = _seconds(seconds)
     if type(timeout) not in (int, float) or not seconds < timeout <= 3600 or not math.isfinite(timeout):
@@ -188,6 +189,11 @@ def record_and_transcribe(directory: Path, *, seconds, indicator, task="transcri
     # Validate the entire requested transcript selection before opening audio.
     arguments = {"task": task, "language": language, "output": output, "audio_fd": 0,
                  "audio": {"media_type": "audio/wav", "byte_length": 44, "sha256": "0" * 64}}
+    if on_update is not None:
+        if not callable(on_update):
+            raise ProtocolError("INVALID_REQUEST", "update observer must be callable")
+        negotiate_stream(directory, timeout=min(1, timeout))
+        arguments["stream"] = STREAM_FEATURE
     request_value("submit", job_id="capture-preflight", args=arguments, timeout=timeout)
     models = client_request(directory, request_value("models", timeout=min(1, timeout)))
     rows = models.get("models")
@@ -213,6 +219,7 @@ def record_and_transcribe(directory: Path, *, seconds, indicator, task="transcri
         descriptor = os.open(f"/proc/self/fd/{writer.fileno()}", os.O_RDONLY | os.O_CLOEXEC)
         try:
             return client_request(directory, value, descriptor,
+                                  on_update=on_update,
                                   cancelled=lambda: (_boolean(cancelled) or _boolean(disconnected)
                                                      or _boolean(lock_state)))
         finally:

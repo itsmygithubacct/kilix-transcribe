@@ -93,21 +93,27 @@ def main() -> None:
                        "--threads", "2", "--no-gpu", "--print-progress"]
             if args["task"] == "translate":
                 command.append("--translate")
-            _run(command, pass_fds=(engine_fd, model_fd, *guard))
-            payload = destination.with_suffix(".json").read_bytes()
-            if len(payload) > MAX_RESULT_BYTES:
-                raise ValueError("engine result exceeds bound")
-            decoded_result = json.loads(payload)
-            language = decoded_result["result"]["language"]
-            for index, segment in enumerate(decoded_result["transcription"]):
-                start, end = segment["offsets"]["from"], segment["offsets"]["to"]
-                # The engine can round the last boundary past the audio end.
-                start, end = min(start, duration_ms), min(end, duration_ms)
-                text = segment["text"].strip()
-                if not text:
-                    continue
-                segments.append(SegmentUpdate(index, 0, start, max(start, end), text, True,
-                                               _words(segment.get("tokens", []), start, max(start, end))))
+            if args.get("stream"):
+                from kilix_transcribe.engine_stream import rolling_segments
+                language, segments = rolling_segments(decoded, directory, frames, command,
+                    (engine_fd, model_fd, *guard), args["task"], _words)
+            else:
+                _run(command, pass_fds=(engine_fd, model_fd, *guard))
+                with destination.with_suffix(".json").open("rb") as source:
+                    payload = source.read(MAX_RESULT_BYTES + 1)
+                if len(payload) > MAX_RESULT_BYTES:
+                    raise ValueError("engine result exceeds bound")
+                decoded_result = json.loads(payload)
+                language = decoded_result["result"]["language"]
+                for index, segment in enumerate(decoded_result["transcription"]):
+                    start, end = segment["offsets"]["from"], segment["offsets"]["to"]
+                    # The engine can round the last boundary past the audio end.
+                    start, end = min(start, duration_ms), min(end, duration_ms)
+                    text = segment["text"].strip()
+                    if not text:
+                        continue
+                    segments.append(SegmentUpdate(index, 0, start, max(start, end), text, True,
+                                                   _words(segment.get("tokens", []), start, max(start, end))))
         transcript = Transcript(args["task"], "whisper.cpp", model["id"], language, tuple(segments))
         result = json.loads(serialize(transcript, "json"))
         result.update({"engine_revision": ENGINE_COMMIT, "model_revision": model["revision"],
@@ -116,7 +122,12 @@ def main() -> None:
         payload = json.dumps(result, allow_nan=False, ensure_ascii=False, separators=(",", ":")).encode()
         if len(payload) > MAX_RESULT_BYTES:
             raise ValueError("result exceeds bound")
+        if args.get("stream"):
+            from kilix_transcribe.streaming import worker_frame
+            payload = worker_frame({"type": "result", "result": result},
+                                   maximum_bytes=MAX_RESULT_BYTES + 65536)
         sys.stdout.buffer.write(payload)
+        sys.stdout.buffer.flush()
 
 
 if __name__ == "__main__":

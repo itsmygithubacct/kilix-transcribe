@@ -16,6 +16,7 @@ import json
 import os
 from pathlib import Path
 import stat
+import select
 import subprocess
 import sys
 import tempfile
@@ -220,7 +221,8 @@ class InstalledRuntime:
         return {"id": self.model_id, "revision": self.model_revision,
                 "engine_id": "whisper.cpp", "engine_revision": ENGINE_COMMIT,
                 "installed": True, "release_qualified": False,
-                "capabilities": ["transcribe", "translate", "language_id", "word_timestamps"]}
+                "capabilities": ["transcribe", "translate", "language_id", "word_timestamps",
+                                 "unstable_partials", "streaming"]}
 
 
 def stop_process(process: subprocess.Popen) -> None:
@@ -238,15 +240,15 @@ def stop_process(process: subprocess.Popen) -> None:
 def run_job(runtime: InstalledRuntime, audio_fd: int, args: dict, *,
             deadline: float, cancel: threading.Event,
             disconnected: Callable[[], bool] = lambda: False,
-            execution_policy=None, job_id=None, progress=None) -> dict:
+            execution_policy=None, job_id=None, progress=None, updates=None) -> dict:
     from .owned import OwnedExecution
     with OwnedExecution(execution_policy, job_id=job_id, workload="stt-job", deadline=deadline,
                         cancelled=cancel.is_set, disconnected=disconnected, progress=progress) as owner:
         return _run_owned_job(runtime, audio_fd, args, deadline=deadline, cancel=cancel,
-                              disconnected=disconnected, owner=owner)
+                              disconnected=disconnected, owner=owner, updates=updates)
 
 
-def _run_owned_job(runtime, audio_fd, args, *, deadline, cancel, disconnected, owner):
+def _run_owned_job(runtime, audio_fd, args, *, deadline, cancel, disconnected, owner, updates=None):
     if cancel.is_set() or disconnected():
         raise ProtocolError("CANCELED", "job canceled")
     if time.monotonic() >= deadline:
@@ -273,13 +275,53 @@ def _run_owned_job(runtime, audio_fd, args, *, deadline, cancel, disconnected, o
                "workspace": workspace}
         process = owner.spawn(
             [sys.executable, "-I", str(worker)], stdin=subprocess.PIPE,
-            stdout=output, stderr=subprocess.DEVNULL, env=environment,
+            stdout=subprocess.PIPE if args.get("stream") else output,
+            stderr=subprocess.DEVNULL, env=environment,
             pass_fds=(audio_fd, *runtime_fds.values()), start_new_session=True,
         )
         try:
             assert process.stdin is not None
             process.stdin.write(json.dumps(job, separators=(",", ":")).encode())
             process.stdin.close()
+            if args.get("stream"):
+                from .streaming import WorkerFrames, SegmentStream
+                from .protocol import encode_payload
+                frames = WorkerFrames(MAX_RESULT_BYTES + 65_536)
+                state = SegmentStream(args["task"])
+                result = None
+                eof = False
+                while not eof or process.poll() is None:
+                    check()
+                    if eof:
+                        cancel.wait(0.025)
+                        continue
+                    if not select.select([process.stdout], [], [], 0.025)[0]:
+                        continue
+                    block = os.read(process.stdout.fileno(), min(65_536, frames.wanted))
+                    if not block:
+                        frames.eof()
+                        eof = True
+                        continue
+                    value = frames.feed(block)
+                    if value is None:
+                        continue
+                    if result is not None or set(value) != {"type", "result"}:
+                        raise ProtocolError("ENGINE_FAILED", "unexpected worker stream frame")
+                    if value["type"] == "update":
+                        encode_payload(value)  # Updates may never use the larger final-frame bound.
+                        state.apply(value["result"])
+                        check()
+                        if updates is not None:
+                            updates(value["result"])
+                    elif value["type"] == "result" and type(value["result"]) is dict:
+                        result = value["result"]
+                        state.finish(result)
+                    else:
+                        raise ProtocolError("ENGINE_FAILED", "unknown worker stream frame")
+                check()
+                if process.returncode != 0 or result is None or result.get("engine_revision") != ENGINE_COMMIT:
+                    raise ProtocolError("ENGINE_FAILED", "streaming worker failed or ended without a final")
+                return result
             while process.poll() is None:
                 owner.check()
                 if cancel.is_set() or disconnected():
@@ -305,4 +347,8 @@ def _run_owned_job(runtime, audio_fd, args, *, deadline, cancel, disconnected, o
                 raise ProtocolError("ENGINE_FAILED", "unbound worker result")
             return result
         finally:
-            owner.finish(process, stop_process)
+            try:
+                owner.finish(process, stop_process)
+            finally:
+                if process.stdout is not None:
+                    process.stdout.close()
