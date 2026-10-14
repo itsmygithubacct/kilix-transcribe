@@ -28,6 +28,10 @@ def main():
         p.add_argument('--'+name,type=Path,required=True)
     p.add_argument('--eigen-source',type=Path,required=True,
                    help='exact native-build Eigen source archive conveyed with its MPL notice')
+    p.add_argument('--python-full-archive',type=Path,required=True,
+                   help='official matching standalone archive containing dependency notices')
+    p.add_argument('--patchelf',type=Path,required=True,
+                   help='pinned build tool for selecting the distro OpenMP runtime')
     p.add_argument('--revision',required=True)
     args=p.parse_args()
     inputs=json.loads((ROOT/'native/diarization/export-inputs.json').read_text())
@@ -43,6 +47,11 @@ def main():
     eigen=json.loads((ROOT/'native/diarization/inputs.json').read_text())['dependencies']['eigen.tar.gz']
     if args.eigen_source.stat().st_size!=eigen['bytes'] or sha(args.eigen_source)!=eigen['sha256']:
         p.error('Eigen source differs from the admitted native-build archive')
+    if (args.python_full_archive.stat().st_size!=93784813
+            or sha(args.python_full_archive)!='80a3625b14e1bd1caf9cbe7fb24a7adcce27ee2150630e666ba1653a925915a9'):
+        p.error('Python dependency notices require the exact official standalone archive')
+    if sha(args.patchelf)!='f2a22996ad184a5329cdc98a2bf7df5badda683894ab9a64c969ac951a05d772':
+        p.error('patchelf differs from the selected 0.17.2.4 wheel build tool')
     out=args.destination.absolute();out.mkdir(mode=0o700)
     (out/'bin').mkdir();(out/'lib').mkdir()
     # Archive committed packages, not mutable Python import paths.
@@ -78,6 +87,16 @@ def main():
     # by the exact locked wheel URLs and digests in export-wheels.json.
     shutil.copytree(site,out/'export-packages',
         ignore=shutil.ignore_patterns('__pycache__','*.pyc','direct_url.json'),symlinks=False)
+    # Do not redistribute an opaque GCC runtime without its corresponding
+    # source. Select Debian's libgomp1 by SONAME, changing no executable code.
+    gomp='libgomp-25c89faf.so.1'
+    torch_lib=out/'export-packages/torch/lib'
+    for name in ('libshm.so','libtorch_cpu.so','libtorch_global_deps.so'):
+        path=torch_lib/name
+        needed=subprocess.check_output([args.patchelf,'--print-needed',path]).decode().splitlines()
+        if needed.count(gomp)!=1:p.error('unexpected Torch OpenMP dependency')
+        subprocess.run([args.patchelf,'--replace-needed',gomp,'libgomp.so.1',path],check=True)
+    (torch_lib/gomp).unlink()
     shutil.copytree(args.native,out/'native')
     (out/'source').mkdir()
     shutil.copyfile(args.eigen_source,out/'source/eigen.tar.gz')
@@ -98,6 +117,39 @@ def main():
         if path.is_file() and any(x in path.name.lower() for x in ('license','notice','copying')):
             target=notices/path.relative_to(site);target.parent.mkdir(parents=True,exist_ok=True)
             shutil.copyfile(path,target)
+    python_notices=out/'notices/python';python_notices.mkdir()
+    child=subprocess.Popen(['zstd','-dc',args.python_full_archive],stdout=subprocess.PIPE)
+    try:
+        with tarfile.open(fileobj=child.stdout,mode='r|') as archive:
+            for member in archive:
+                if not member.isfile():continue
+                if member.name=='python/PYTHON.json':
+                    if member.size>4*1024**2:raise ValueError('Python metadata exceeds bound')
+                    (python_notices/'UPSTREAM-PYTHON.json').write_bytes(archive.extractfile(member).read())
+                elif member.name.startswith('python/licenses/'):
+                    if member.size>4*1024**2:raise ValueError('Python notice exceeds bound')
+                    (python_notices/Path(member.name).name).write_bytes(archive.extractfile(member).read())
+    finally:
+        child.stdout.close()
+        if child.wait():raise ValueError('Python notice archive failed')
+    (out/'notices/OPENMP-DEPENDENCY.txt').write_text(
+        'Torch 2.7.0+cpu comes from the exact wheels in export-wheels.json.\n'
+        'Only DT_NEEDED references in libshm.so, libtorch_cpu.so and libtorch_global_deps.so\n'
+        'are changed from the bundled libgomp-25c89faf.so.1 to system libgomp.so.1.\n'
+        'The bundled GCC runtime is omitted. Install Debian libgomp1; no compiler/runtime\n'
+        'source from that package is redistributed by this software archive.\n')
+    (out/'notices/SOURCE-AVAILABILITY.txt').write_text(
+        'Converter source and changes: https://github.com/itsmygithubacct/kilix-transcribe/tree/'+args.revision+'\n'
+        'CPython 3.12.8 source: https://www.python.org/ftp/python/3.12.8/Python-3.12.8.tar.xz\n'
+        'SHA256: c909157bb25ec114e5869124cc2a9c4a4d4c1e957ca4ff553f1edc692101154e\n'
+        'Standalone build scripts/patches and complete dependency source URLs/checksums:\n'
+        'https://github.com/astral-sh/python-build-standalone/tree/20241206\n'
+        'https://github.com/astral-sh/python-build-standalone/blob/20241206/pythonbuild/downloads.py\n'
+        'Berkeley DB 6.0.19 source (Sleepycat; see LICENSE.bdb.txt):\n'
+        'https://ftp.osuosl.org/pub/blfs/conglomeration/db/db-6.0.19.tar.gz\n'
+        'SHA256: 2917c28f60903908c2ca4587ded1363b812c4e830a5326aaa77c9879d13ae18e\n'
+        'Python dependency identities and original notices: notices/python/.\n'
+        'Exact Eigen source is included in source/eigen.tar.gz.\n')
     value={'schema':'kilix.transcribe.diarization-tool/v1',
         'revision':'032b8131a7ad812f87061955ca974c99060c5a03','provider_ref':args.revision,
         'content_ref':content_ref,'files':{str(x.relative_to(out)):sha(x) for x in sorted(out.rglob('*')) if x.is_file()}}
