@@ -79,7 +79,6 @@ def main():
                 '/usr/bin/bwrap','--unshare-net','--unshare-pid','--die-with-parent','--ro-bind','/','/',
                 '--proc','/proc','--dev','/dev','--tmpfs','/tmp','--clearenv','--setenv','PATH','/usr/bin:/bin',
                 '--setenv','HOME','/tmp','--setenv','OMP_NUM_THREADS','4',
-                '--preserve-fds',str(max(checkpoint,graph_fd)-2),
                 str(ROOT/'python/bin/python3.12'),'-I','-S','-B',str(ROOT/'bin/export.py'),str(checkpoint),str(graph_fd)]
             parent=os.getppid();child=subprocess.Popen(cmd,pass_fds=(checkpoint,graph_fd),preexec_fn=death_signal)
             expires=time.monotonic()+600
