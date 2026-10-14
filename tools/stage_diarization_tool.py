@@ -60,6 +60,19 @@ def main():
     package(args.content,content_ref,'src/kilix_content',out/'lib/kilix_content')
     package(args.content,content_ref,'third_party/kilix-license/src/kilix_license',out/'lib/kilix_license')
     shutil.copytree(python_root,out/'python',ignore=shutil.ignore_patterns('__pycache__','*.pyc'),symlinks=False)
+    # uv's relocatable installation rewrites build-prefix metadata to its
+    # cache location. Preserve the configuration values while deriving that
+    # prefix from this relocated interpreter; never convey the builder home.
+    for path in (out/'python').rglob('_sysconfigdata*.py'):
+        text=path.read_text()
+        if str(python_root) in text:
+            text=text.replace(str(python_root),'@KILIX_PYTHON_PREFIX@')
+            text+=('\nimport os as _kilix_os\n'
+                '_kilix_prefix = _kilix_os.path.dirname(_kilix_os.path.dirname(_kilix_os.path.dirname(__file__)))\n'
+                'for _kilix_key, _kilix_value in list(build_time_vars.items()):\n'
+                '    if isinstance(_kilix_value, str):\n'
+                '        build_time_vars[_kilix_key] = _kilix_value.replace("@KILIX_PYTHON_PREFIX@", _kilix_prefix)\n')
+            path.write_text(text)
     # Installed-wheel acquisition metadata names the builder's local cache.
     # Runtime/version/licence metadata remains; public provenance is conveyed
     # by the exact locked wheel URLs and digests in export-wheels.json.
