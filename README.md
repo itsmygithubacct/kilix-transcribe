@@ -162,6 +162,17 @@ Run `make check` for the design/interface controls and unit tests. Process
 supervision tests use explicit fake tools; passing them is not model-quality
 or hardware-profile acceptance.
 
+Rolling transcription can recover words when adjacent decoder windows place
+the same words on opposite sides of a core boundary. Recovery requires a unique
+suffix of at least three already committed textual units and agreement with
+the preceding window's uncommitted lookahead. Repeated or changed text keeps
+the ordinary ownership rule. Up to eight agreed units can be recovered; their
+pre-core timestamps are clamped to the core start and may have zero duration.
+These are approximate boundary timings, not forced alignment. Previously
+published words, stable updates, model decoding and batch transcription stay
+unchanged. The existing bounds, final-result binding and refusal checks still
+apply. Run `tests/test_overlap_jitter.py` for the inert window-drift regressions.
+
 
 ### Shared execution coordination
 
