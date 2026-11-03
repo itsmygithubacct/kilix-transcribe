@@ -57,7 +57,7 @@ class OverlapJitterTests(unittest.TestCase):
         self.assertEqual([s.text for s in segments], ['we saw a bright', 'red bird'])
         words = [w for s in segments for w in s.words]
         self.assertEqual([w.text for w in words], ['we','saw','a','bright','red','bird'])
-        self.assertEqual((words[-2].start_ms, words[-2].end_ms), (20000,20000))
+        self.assertEqual((words[-2].start_ms, words[-2].end_ms), (20100,20400))
         self.assertEqual((words[-1].start_ms, words[-1].end_ms), (20200,20500))
 
     def test_changed_lookahead_does_not_add_unagreed_words(self):

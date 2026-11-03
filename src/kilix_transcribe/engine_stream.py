@@ -13,6 +13,7 @@ import wave
 from collections import Counter
 
 from .protocol import ProtocolError, decode_payload, encode_payload
+from .overlap import reconcile
 from .streaming import (MAX_WINDOW_BYTES, MAX_UPDATE_TEXT_BYTES, UPDATE_INTERVAL, SegmentStream,
                         worker_frame, CORE_MS, CONTEXT_MS)
 from .surface import SegmentUpdate, _segment_payload
@@ -134,67 +135,8 @@ def _text_units(tokens):
     return units
 
 
-def _unit_text(unit):
-    return ''.join(token['text'] for token in unit[0]).strip()
-
-
-def _recover_overlap(observed, committed, deferred, start):
-    """Recover agreed words stranded on opposite sides of an ownership cut.
-
-    Require a unique, substantial suffix of already committed text, followed
-    by words also present in the preceding window's uncommitted lookahead.
-    Ambiguous repeats or changed text retain the ordinary ownership rule.
-    Recovered pre-core timings are explicitly clamped to the core boundary;
-    no stable segment or previously published word is revised.
-    """
-    if not start or not deferred:
-        return []
-    previous = _text_units([{'text': text, 'offsets': {'from': t0, 'to': t1}}
-                            for text, t0, t1 in committed])
-    current = _text_units(observed)
-    anchor_end = None
-    for size in range(min(8, len(previous)), 2, -1):
-        needle = [_unit_text(unit) for unit in previous[-size:]]
-        if len(set(needle)) < 2 or sum(map(len, needle)) < 8:
-            continue
-        matches = [i + size for i in range(len(current) - size + 1)
-                   if current[i][1] >= start - OVERLAP_MS
-                   and current[i + size - 1][2] <= start + OVERLAP_MS
-                   and [_unit_text(unit) for unit in current[i:i + size]] == needle]
-        if len(matches) == 1:
-            anchor_end = matches[0]
-            break
-        if matches:
-            return []
-    if anchor_end is None:
-        return []
-    stop = anchor_end
-    while stop < len(current) and (current[stop][1] + current[stop][2]) // 2 < start:
-        stop += 1
-    stranded = current[anchor_end:stop]
-    if (not 0 < len(stranded) <= 8 or len(deferred) < len(stranded)
-            or stop == len(current) or current[stop][1] < start
-            or any(unit[1] < start - OVERLAP_MS for unit in stranded)
-            or any((unit[1] + unit[2]) // 2 >= start for unit in current[:stop])
-            or [_unit_text(unit) for unit in stranded]
-                != [_unit_text(unit) for unit in deferred[:len(stranded)]]):
-        return []
-    already_emitted = set(committed)
-    if any((token['text'], token['offsets']['from'], token['offsets']['to']) in already_emitted
-           for unit in stranded for token in unit[0]):
-        return []
-    recovered = [{'text': token['text'], 'offsets': {
-                    'from': max(start, token['offsets']['from']),
-                    'to': max(start, token['offsets']['to'])}}
-                 for unit in stranded for token in unit[0]]
-    recovered_starts = [unit[1] for unit in _text_units(recovered)]
-    if recovered_starts != sorted(recovered_starts) or recovered_starts[-1] > current[stop][1]:
-        return []
-    return recovered
-
-
 def _final_window(payload, *, base, start, end, words, include_end=False, window_end=None,
-                  committed=(), assigned=None, deferred=(), following=None):
+                  committed=(), assigned=None, previous=(), observations=None):
     value = decode_payload(payload, maximum_bytes=MAX_WINDOW_BYTES, maximum_nodes=100_000)
     language = value["result"]["language"]
     units = []
@@ -202,6 +144,7 @@ def _final_window(payload, *, base, start, end, words, include_end=False, window
     fallback = []
     observed = []
     remaining = Counter(committed)
+    removed = set()
     for segment in value["transcription"]:
         for token in segment.get("tokens", []):
             raw = token.get("text", "")
@@ -214,9 +157,11 @@ def _final_window(payload, *, base, start, end, words, include_end=False, window
             if window_end is not None:
                 t0, t1 = min(t0, window_end), min(t1, window_end)
             identity = (raw, t0, t1)
-            observed.append({'text': raw, 'offsets': {'from': t0, 'to': t1}})
+            token = {'text': raw, 'offsets': {'from': t0, 'to': t1}}
+            observed.append(token)
             if remaining[identity]:
                 remaining[identity] -= 1
+                removed.add(id(token))
                 # A visible continuation may already belong to a complete
                 # committed unit whose first piece is outside this window.
                 # Never glue new pieces across a removed committed unit.
@@ -232,7 +177,6 @@ def _final_window(payload, *, base, start, end, words, include_end=False, window
             if pending is not None and (raw[:1].isspace() or t0 > pending[2] + 500):
                 units.append(pending)
                 pending = None
-            token = {"text": raw, "offsets": {"from": t0, "to": t1}}
             if pending is None:
                 pending = [[token], t0, t1]
             else:
@@ -245,14 +189,23 @@ def _final_window(payload, *, base, start, end, words, include_end=False, window
                 fallback.append(segment["text"].strip())
     if pending is not None:
         units.append(pending)
-    chosen = _recover_overlap(observed, committed, deferred, start)
-    for tokens, t0, t1 in units:
-        midpoint = (t0 + t1) // 2
-        if start <= midpoint < end or include_end and midpoint == end:
-            chosen.extend(tokens)
-    if following is not None:
-        following.extend(unit for unit in _text_units(observed)
-                         if end <= (unit[1] + unit[2]) // 2 <= end + OVERLAP_MS)
+    complete = _text_units(observed)
+    selected, represented = reconcile(previous, units, complete, removed, start, end, include_end)
+    chosen = [token for unit in selected for token in unit[0]]
+    if observations is not None:
+        represented_tokens = {id(token) for i, unit in enumerate(units)
+                              if i in represented for token in unit[0]}
+        for unit in complete:
+            token_ids = {id(token) for token in unit[0]}
+            if token_ids <= removed or token_ids <= represented_tokens:
+                state = 'committed'
+            elif token_ids & removed:
+                state = 'ambiguous'
+            elif end <= (unit[1]+unit[2])//2 <= end+OVERLAP_MS:
+                state = 'deferred'
+            else:
+                state = 'other'
+            observations.append({'unit': unit, 'state': state})
     text = ("".join(token["text"] for token in chosen) if chosen else " ".join(fallback)).strip()
     # The stable segment envelope will include boundary-crossing words;
     # clipping here would erase part of their original full-window timing.
@@ -270,7 +223,7 @@ def rolling_segments(decoded: Path, directory: Path, frames, command, pass_fds, 
     language = "auto"
     segments = []
     committed = []
-    deferred = []
+    previous = []
     with wave.open(str(decoded), "rb") as reader:
         for segment_id, start in enumerate(range(0, duration, WINDOW_MS)):
             end = min(duration, start + WINDOW_MS)
@@ -297,15 +250,15 @@ def rolling_segments(decoded: Path, directory: Path, frames, command, pass_fds, 
                     with result_file.open("rb") as source:
                         payload = source.read(MAX_WINDOW_BYTES + 1)
                     assigned = []
-                    following = []
+                    observations = []
                     language, text, timings = _final_window(payload, base=base, start=start, end=end,
                         words=words, include_end=end == duration, window_end=stop,
-                        committed=committed, assigned=assigned, deferred=deferred, following=following)
+                        committed=committed, assigned=assigned, previous=previous, observations=observations)
                     stable_start = min([start, *(word.start_ms for word in timings)])
                     stable_end = max([end, *(word.end_ms for word in timings)])
                     emitter.emit(segment_id, stable_start, stable_end, text, True, timings)
                     committed.extend(assigned)
-                    deferred = following
+                    previous = observations
                     segments.append(emitter.state.segments[segment_id])
                 result_file.unlink()
                 window.unlink()

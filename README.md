@@ -162,16 +162,21 @@ Run `make check` for the design/interface controls and unit tests. Process
 supervision tests use explicit fake tools; passing them is not model-quality
 or hardware-profile acceptance.
 
-Rolling transcription can recover words when adjacent decoder windows place
-the same words on opposite sides of a core boundary. Recovery requires a unique
-suffix of at least three already committed textual units and agreement with
-the preceding window's uncommitted lookahead. Repeated or changed text keeps
-the ordinary ownership rule. Up to eight agreed units can be recovered; their
-pre-core timestamps are clamped to the core start and may have zero duration.
-These are approximate boundary timings, not forced alignment. Previously
-published words, stable updates, model decoding and batch transcription stay
-unchanged. The existing bounds, final-result binding and refusal checks still
-apply. Run `tests/test_overlap_jitter.py` for the inert window-drift regressions.
+Rolling transcription reconciles complete textual occurrences across adjacent
+decoder windows. A unique monotone match, including a substantial three-unit
+anchor, can suppress a copy already committed or recover an agreed deferred
+word. Matching keeps exact Unicode and punctuation. Genuine repeated words
+remain separate occurrences; ambiguous matches retain ordinary ownership.
+Alignment is bounded to 64 units in each shared context, with at most two
+seconds of timestamp drift. Current observed timing is preferred; recovery
+may use whole matching units from the preceding window to keep starts ordered.
+If no legal observed timing path exists, reconciliation is declined. Timings
+are never moved to the core boundary or averaged. They remain approximate
+decoder observations, including native zero durations, rather than forced
+alignment. Stable updates are immutable. Model decoding, batch transcription,
+public timing/refusal bounds and final-result binding stay unchanged. Run
+`tests/test_word_reconciliation.py` and `tests/test_overlap_jitter.py` for the
+inert boundary, repetition and original-timing regressions.
 
 
 ### Shared execution coordination
@@ -322,10 +327,12 @@ pieces and punctuation stay attached. Runs without whitespace remain indivisible
 units; this policy does not claim linguistic word segmentation. Exact raw text
 and full word times survive ownership. Stable segment envelopes expand into
 the existing context when necessary to contain a crossing word. Already
-committed token occurrences are reconciled by exact raw text and absolute
-timing before assembling a later window, so a visible continuation cannot
-repeat an already committed unit. Matching words at different times remain
-distinct; complete units have no artificial two-second length limit. IDs increase
+committed token occurrences retain their exact raw text/time multiset rule,
+so a visible continuation cannot repeat an already committed unit. Whole-unit
+reconciliation additionally handles timestamp drift using adjacent occurrence
+evidence as described above. It changes only the current provisional core;
+previous stable segments are never revised. Equal text alone cannot deduplicate
+words, and complete units have no artificial two-second length limit. IDs increase
 per interval; revisions and update sequence numbers
 are contiguous. A new core requires the previous core to be stable and cover
 its complete ownership interval; updates and final duration must agree with
