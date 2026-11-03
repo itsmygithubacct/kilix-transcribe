@@ -178,6 +178,13 @@ public timing/refusal bounds and final-result binding stay unchanged. Run
 `tests/test_word_reconciliation.py` and `tests/test_overlap_jitter.py` for the
 inert boundary, repetition and original-timing regressions.
 
+Native segments that provide text without tokens are retained in their original
+content order alongside selected timed units. They do not acquire invented word
+timestamps. Their text separates token runs, so continuation pieces cannot form
+a word through an intervening untimed phrase. Recovered units retain their
+current content position and the selected original observation's timing. See
+`tests/test_mixed_native_segments.py` for mixed-segment preservation checks.
+
 
 ### Shared execution coordination
 

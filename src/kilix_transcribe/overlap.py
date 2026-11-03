@@ -79,31 +79,38 @@ def _ordered_path(options):
     return min(paths, key=lambda p: p[:2])[2]
 
 
-def reconcile(previous, units, observed, removed, start, end, include_end=False):
+def reconcile(previous, units, observed, removed, start, end, include_end=False,
+              selected_indices=None):
     """Return selected units and represented current occurrence indices.
 
     Whole previous observations provide alternate timings, never invented
     ones. Stable output is only read. Ambiguous or infeasible reconciliation
     returns ordinary midpoint ownership unchanged.
+    Optional selected_indices records current content positions even when
+    the chosen tokens come from a previous observation; it never guides matching.
     """
     normal = {i for i, unit in enumerate(units) if owned(unit, start, end, include_end)}
     fallback = ([unit for i, unit in enumerate(units) if i in normal], normal)
-    if not previous:
+    def ordinary():
+        if selected_indices is not None:
+            selected_indices.extend(i for i in range(len(units)) if i in normal)
         return fallback
+    if not previous:
+        return ordinary()
     visible = []
     whole = {}
     for i, unit in enumerate(observed):
         identities = {id(token) for token in unit[0]}
-        eligible = not identities & removed or identities <= removed
+        eligible = bool(identities) and (not identities & removed or identities <= removed)
         visible.append((i, unit, eligible))
         whole[tuple(id(token) for token in unit[0])] = i
     matched = _mapping(previous, visible, start)
     if matched is None:
-        return fallback
+        return ordinary()
     mapping = {i: matched[whole[key]] for i, unit in enumerate(units)
                if (key := tuple(id(token) for token in unit[0])) in whole
                and whole[key] in matched}
-    represented, options = set(), []
+    represented, options, positions = set(), [], []
     for i, unit in enumerate(units):
         prior = mapping.get(i)
         if prior is not None and prior['state'] == 'committed':
@@ -116,6 +123,11 @@ def reconcile(previous, units, observed, removed, start, end, include_end=False)
             variants.append((1, prior['unit']))
         if variants:
             options.append(variants)
+            positions.append(i)
             represented.add(i)
     chosen = _ordered_path(options)
-    return fallback if chosen is None else (chosen, represented)
+    if chosen is None:
+        return ordinary()
+    if selected_indices is not None:
+        selected_indices.extend(positions)
+    return chosen, represented

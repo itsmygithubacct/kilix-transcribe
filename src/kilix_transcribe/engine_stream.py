@@ -126,8 +126,14 @@ def _infer(command, pass_fds, *, emitter, segment_id, base, start, end, limit):
 def _text_units(tokens):
     units = []
     for token in tokens:
+        if token is None:
+            # Untimed native text separates textual occurrences. Keep an
+            # unavailable position so an alignment anchor cannot bridge it.
+            units.append([[], 0, 0])
+            continue
         t0, t1 = token['offsets']['from'], token['offsets']['to']
-        if not units or token['text'][:1].isspace() or t0 > units[-1][2] + 500:
+        if (not units or not units[-1][0] or token['text'][:1].isspace()
+                or t0 > units[-1][2] + 500):
             units.append([[token], t0, t1])
         else:
             units[-1][0].append(token)
@@ -143,6 +149,7 @@ def _final_window(payload, *, base, start, end, words, include_end=False, window
     pending = None
     fallback = []
     observed = []
+    groups = {}
     remaining = Counter(committed)
     removed = set()
     for segment in value["transcription"]:
@@ -159,6 +166,7 @@ def _final_window(payload, *, base, start, end, words, include_end=False, window
             identity = (raw, t0, t1)
             token = {'text': raw, 'offsets': {'from': t0, 'to': t1}}
             observed.append(token)
+            groups[id(token)] = len(fallback)
             if remaining[identity]:
                 remaining[identity] -= 1
                 removed.add(id(token))
@@ -185,19 +193,28 @@ def _final_window(payload, *, base, start, end, words, include_end=False, window
         if not segment.get("tokens"):
             timing = segment["offsets"]
             t0, t1 = base + int(timing["from"]), base + int(timing["to"])
-            if start <= (t0 + t1) // 2 < end:
-                fallback.append(segment["text"].strip())
+            text = segment["text"].strip()
+            if text:
+                if pending is not None:
+                    units.append(pending)
+                    pending = None
+                observed.append(None)
+                fallback.append(text if start <= (t0 + t1) // 2 < end else "")
     if pending is not None:
         units.append(pending)
     complete = _text_units(observed)
-    selected, represented = reconcile(previous, units, complete, removed, start, end, include_end)
+    positions = []
+    selected, represented = reconcile(previous, units, complete, removed, start, end, include_end,
+                                      selected_indices=positions)
     chosen = [token for unit in selected for token in unit[0]]
     if observations is not None:
         represented_tokens = {id(token) for i, unit in enumerate(units)
                               if i in represented for token in unit[0]}
         for unit in complete:
             token_ids = {id(token) for token in unit[0]}
-            if token_ids <= removed or token_ids <= represented_tokens:
+            if not token_ids:
+                state = 'ambiguous'
+            elif token_ids <= removed or token_ids <= represented_tokens:
                 state = 'committed'
             elif token_ids & removed:
                 state = 'ambiguous'
@@ -206,7 +223,6 @@ def _final_window(payload, *, base, start, end, words, include_end=False, window
             else:
                 state = 'other'
             observations.append({'unit': unit, 'state': state})
-    text = ("".join(token["text"] for token in chosen) if chosen else " ".join(fallback)).strip()
     # The stable segment envelope will include boundary-crossing words;
     # clipping here would erase part of their original full-window timing.
     word_start = min([start, *(token["offsets"]["from"] for token in chosen)])
@@ -214,7 +230,21 @@ def _final_window(payload, *, base, start, end, words, include_end=False, window
     if assigned is not None:
         assigned.extend((token["text"], token["offsets"]["from"], token["offsets"]["to"])
                         for token in chosen)
-    return language, text, words(chosen, word_start, word_end)
+    # Preserve source content order even when reconciliation selects an older
+    # observation's timing. Text-only records never acquire invented word times,
+    # and continuations must not join across their intervening text.
+    selected_groups = [[] for _ in range(len(fallback) + 1)]
+    for position, unit in zip(positions, selected, strict=True):
+        selected_groups[groups[id(units[position][0][0])]].extend(unit[0])
+    parts, timings = [], []
+    for group, tokens in enumerate(selected_groups):
+        text = "".join(token["text"] for token in tokens).strip()
+        if text:
+            parts.append(text)
+        timings.extend(words(tokens, word_start, word_end))
+        if group < len(fallback) and fallback[group]:
+            parts.append(fallback[group])
+    return language, " ".join(parts), tuple(timings)
 
 
 def rolling_segments(decoded: Path, directory: Path, frames, command, pass_fds, task, words):
