@@ -9,6 +9,7 @@ from pathlib import Path
 import socket
 import time
 import unittest
+from unittest.mock import patch
 
 from kilix_transcribe.owned import ExecutionPolicy
 from kilix_transcribe.protocol import ProtocolError, receive_packet, send_packet
@@ -90,22 +91,40 @@ class LeasedRuntimeTests(unittest.TestCase):
                         invoke(fixture, mode)
                 assert_reusable(fixture)
 
+    def _check_ending_handoff(self, ending):
+        with prepared('escape') as fixture:
+            with raw(fixture, 'escape', .6 if ending == 'deadline' else 5) as channel:
+                # A deadline may expire during decoding, before an engine
+                # descendant exists. Cancel/disconnect still exercise a live
+                # descendant; deadline requires its terminal error and cleanup.
+                if ending != 'deadline':
+                    until(lambda: waiting(fixture))
+                if ending == 'cancel':
+                    client_request(fixture.ipc, request_value('cancel', job_id='leased-job'))
+                if ending == 'disconnect':
+                    channel.close()
+                else:
+                    event, descriptors = receive_packet(channel)
+                    self.assertFalse(descriptors)
+                    self.assertEqual(event['type'], 'error')
+                    self.assertEqual(event['error']['code'],
+                        'CANCELED' if ending == 'cancel' else 'DEADLINE_EXCEEDED')
+            assert_reusable(fixture)
+            return (fixture.installation / 'engine.pid').exists()
+
     def test_actual_cancel_deadline_and_disconnect_allow_safe_handoff(self):
         for ending in ('cancel', 'deadline', 'disconnect'):
-            with self.subTest(ending=ending), prepared('escape') as fixture:
-                with raw(fixture, 'escape', .6 if ending == 'deadline' else 5) as channel:
-                    until(lambda: waiting(fixture))
-                    if ending == 'cancel':
-                        client_request(fixture.ipc, request_value('cancel', job_id='leased-job'))
-                    if ending == 'disconnect':
-                        channel.close()
-                    else:
-                        event, descriptors = receive_packet(channel)
-                        self.assertFalse(descriptors)
-                        self.assertEqual(event['type'], 'error')
-                        self.assertEqual(event['error']['code'],
-                            'CANCELED' if ending == 'cancel' else 'DEADLINE_EXCEEDED')
-                assert_reusable(fixture)
+            with self.subTest(ending=ending):
+                self._check_ending_handoff(ending)
+
+    def test_deadline_before_engine_start_allows_safe_handoff(self):
+        delayed_decoder = '''#!/usr/bin/python3
+import shutil, sys, time
+time.sleep(2)
+shutil.copyfile(sys.argv[sys.argv.index('-i')+1],sys.argv[-1])
+'''
+        with patch.object(runtime_fixture, 'DECODER', delayed_decoder):
+            self.assertFalse(self._check_ending_handoff('deadline'))
 
     def test_queued_cancel_and_deadline_do_not_start_an_engine_or_release_other_owner(self):
         for ending in ('cancel', 'deadline'):
