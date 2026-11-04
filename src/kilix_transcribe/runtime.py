@@ -9,6 +9,7 @@ licence receipt.
 from __future__ import annotations
 
 import hashlib
+import copy
 import ctypes
 from contextlib import contextmanager, ExitStack
 import fcntl
@@ -76,6 +77,14 @@ def private_directory(path: Path, *, create: bool = False) -> Path:
             or info.st_mode & 0o077):
         raise ProtocolError("INVALID_RUNTIME", "directory must be private and owned")
     return path
+
+
+class RuntimeSnapshots(dict):
+    def __init__(self, manifest):
+        super().__init__()
+        self.manifest = copy.deepcopy(manifest)
+        self.authority = None
+        self.model_sha256 = None
 
 
 class InstalledRuntime:
@@ -153,15 +162,16 @@ class InstalledRuntime:
             raise
 
     @contextmanager
-    def snapshots(self, check: Callable[[], None] = lambda: None):
+    def snapshots(self, check: Callable[[], None] = lambda: None, *, require_managed=False):
         """Carry verified, sealed bytes through execution; never reopen paths."""
         root_fd, directories = self._open_root()
-        descriptors = {}
+        descriptors = RuntimeSnapshots(self.manifest)
+        model_source = self.model_source
         try:
             if directories != self._directories:
                 raise ProtocolError("INVALID_RUNTIME", "runtime directory identity changed")
-            for name, expected in self.manifest["files"].items():
-                if name == "model.bin" and self.model_source is not None:
+            for name, expected in descriptors.manifest["files"].items():
+                if name == "model.bin" and model_source is not None:
                     continue
                 check()
                 source = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=root_fd)
@@ -199,10 +209,30 @@ class InstalledRuntime:
                     os.close(source)
                     if snapshot >= 0:
                         os.close(snapshot)
-            if self.model_source is not None:
-                with self.model_source.open(check) as asset:
-                    descriptors["model.bin"] = self.model_source.descriptor(
+            if model_source is not None:
+                if require_managed:
+                    from .content import InstalledModel
+                    if type(model_source) is not InstalledModel:
+                        raise ProtocolError('INVALID_RUNTIME', 'managed installed model is required')
+                    model_source.bind('whisper-tiny-ggml', descriptors.manifest['model']['revision'],
+                                      {'model.bin': descriptors.manifest['files']['model.bin']})
+                with model_source.open(check) as asset:
+                    descriptors["model.bin"] = model_source.descriptor(
                         asset, "model.bin", check, verify_bytes=True)
+                    if require_managed:
+                        digest = hashlib.sha256()
+                        offset = 0
+                        while True:
+                            check()
+                            block = os.pread(descriptors["model.bin"], 1024 * 1024, offset)
+                            if not block:
+                                break
+                            digest.update(block)
+                            offset += len(block)
+                        if digest.hexdigest() != descriptors.manifest["files"]["model.bin"]:
+                            raise ProtocolError("INVALID_RUNTIME", "job model snapshot differs")
+                        descriptors.authority = model_source
+                        descriptors.model_sha256 = digest.hexdigest()
             yield descriptors
         finally:
             os.close(root_fd)
@@ -242,15 +272,15 @@ def stop_process(process: subprocess.Popen) -> None:
 def run_job(runtime: InstalledRuntime, audio_fd: int, args: dict, *,
             deadline: float, cancel: threading.Event,
             disconnected: Callable[[], bool] = lambda: False,
-            execution_policy=None, job_id=None, progress=None, updates=None) -> dict:
+            execution_policy=None, job_id=None, progress=None, updates=None, request_id=None) -> dict:
     from .owned import OwnedExecution
     with OwnedExecution(execution_policy, job_id=job_id, workload="stt-job", deadline=deadline,
                         cancelled=cancel.is_set, disconnected=disconnected, progress=progress) as owner:
         return _run_owned_job(runtime, audio_fd, args, deadline=deadline, cancel=cancel,
-                              disconnected=disconnected, owner=owner, updates=updates)
+                              disconnected=disconnected, owner=owner, updates=updates, request_id=request_id, job_id=job_id)
 
 
-def _run_owned_job(runtime, audio_fd, args, *, deadline, cancel, disconnected, owner, updates=None):
+def _run_owned_job(runtime, audio_fd, args, *, deadline, cancel, disconnected, owner, updates=None, request_id=None, job_id=None):
     if cancel.is_set() or disconnected():
         raise ProtocolError("CANCELED", "job canceled")
     if time.monotonic() >= deadline:
@@ -277,8 +307,31 @@ def _run_owned_job(runtime, audio_fd, args, *, deadline, cancel, disconnected, o
     worker = Path(__file__).with_name("supervisor.py")
     environment = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8",
                    "OMP_NUM_THREADS": "2", "OPENBLAS_NUM_THREADS": "2"}
-    with ExitStack() as stack, runtime.snapshots(check) as runtime_fds, tempfile.TemporaryDirectory(prefix="kilix-transcribe-job-") as workspace, tempfile.TemporaryFile() as output:
-        job = {"runtime_fds": runtime_fds, "manifest": runtime.manifest,
+    with ExitStack() as stack, runtime.snapshots(check, **({'require_managed': True} if 'attestation' in args else {})) as runtime_fds, tempfile.TemporaryDirectory(prefix="kilix-transcribe-job-") as workspace, tempfile.TemporaryFile() as output:
+        def finalize(result):
+            if 'attestation' not in args:
+                return result
+            from .attestation import FEATURE, ManagedResult
+            authority = runtime_fds.authority
+            manifest = runtime_fds.manifest
+            if authority is None or runtime_fds.model_sha256 is None:
+                raise ProtocolError('INVALID_RUNTIME', 'managed model job snapshot is required')
+            expected = {'engine': {'id': 'whisper.cpp'}, 'model': {'id': manifest['model']['id']},
+                        'engine_revision': manifest['engine_revision'],
+                        'model_revision': manifest['model']['revision']}
+            if any(result.get(k) != v for k, v in expected.items()) or any(
+                    k in result for k in ('model_sha256', 'receipt_enforced', 'attestation')):
+                raise ProtocolError('ENGINE_FAILED', 'worker result differs from managed job')
+            authority.require_authorized(check)
+            value = dict(result, model_sha256=runtime_fds.model_sha256, receipt_enforced=True,
+                         attestation={'feature': FEATURE,
+                                      'service_instance': args['attestation']['service_instance'],
+                                      'request_id': request_id, 'job_id': job_id,
+                                      'audio_sha256': args['audio']['sha256']})
+            return ManagedResult(value, authority.require_authorized)
+        if 'attestation' in args and runtime_fds.authority is None:
+            raise ProtocolError('INVALID_RUNTIME', 'managed model job snapshot is required')
+        job = {"runtime_fds": runtime_fds, "manifest": runtime_fds.manifest,
                "audio_fd": audio_fd, "args": args,
                "workspace": workspace, "deadline": deadline}
         diarization_fds = {}
@@ -358,7 +411,7 @@ def _run_owned_job(runtime, audio_fd, args, *, deadline, cancel, disconnected, o
                 raise ProtocolError("ENGINE_FAILED", "invalid worker result") from error
             if type(result) is not dict or result.get("engine_revision") != ENGINE_COMMIT:
                 raise ProtocolError("ENGINE_FAILED", "unbound worker result")
-            return result
+            return finalize(result)
         finally:
             try:
                 owner.finish(process, stop_process)

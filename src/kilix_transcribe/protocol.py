@@ -268,7 +268,11 @@ class ProviderRequest:
         arguments = value["args"]
         _require(type(arguments) is dict, "INVALID_REQUEST", "args must be an object")
         _walk_forbidden(arguments)
-        if operation in {"models", "status", "cancel", "unload"}:
+        if operation == "models" and arguments:
+            from .attestation import selection
+            _require(set(arguments) == {"attestation"}, "INVALID_REQUEST", "invalid managed models request")
+            selection(arguments["attestation"])
+        elif operation in {"models", "status", "cancel", "unload"}:
             _require(not arguments, "INVALID_REQUEST", "operation takes no arguments")
         elif operation == "hello":
             _require({"protocol_major", "protocol_minor"} <= set(arguments)
@@ -282,7 +286,8 @@ class ProviderRequest:
                      "INVALID_REQUEST", "protocol minor must be a non-negative integer")
             if "features" in arguments:
                 _require(arguments["protocol_minor"] >= 1
-                         and arguments["features"] == [STREAM_FEATURE],
+                         and (arguments["features"] == [STREAM_FEATURE] or
+                              (arguments["protocol_minor"] >= 2 and arguments["features"] == ["managed-job-v1"])),
                          "INCOMPATIBLE_PROTOCOL", "streaming feature negotiation is incompatible")
         else:
             cls._validate_submit(arguments)
@@ -291,7 +296,7 @@ class ProviderRequest:
     @staticmethod
     def _validate_submit(arguments: dict[str, Any]) -> None:
         required = {"task", "language", "output", "audio_fd", "audio"}
-        optional = {"diarization_session", "stream"}
+        optional = {"diarization_session", "stream", "attestation"}
         _require(required <= set(arguments) <= required | optional,
                  "INVALID_REQUEST", "submit argument population is invalid")
         _require(type(arguments["task"]) is str and arguments["task"] in TASKS,
@@ -323,6 +328,11 @@ class ProviderRequest:
                  "diarization_session must be boolean")
         _require(arguments["task"] == "diarize" or not diarization,
                  "INVALID_REQUEST", "diarization_session is scoped to the diarize task")
+        if "attestation" in arguments:
+            from .attestation import selection
+            selection(arguments["attestation"])
+            _require(arguments["task"] in {"transcribe", "translate"} and "stream" not in arguments,
+                     "UNSUPPORTED_CAPABILITY", "managed-job evidence requires a final speech result")
         if "stream" in arguments:
             _require(arguments["stream"] == STREAM_FEATURE,
                      "INCOMPATIBLE_PROTOCOL", "unsupported streaming feature")

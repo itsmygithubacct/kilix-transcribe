@@ -8,13 +8,15 @@ from .surface import RESULT_SCHEMA, SegmentUpdate, SurfaceError, Transcript, Wor
 MAX_RESULT_BYTES = 16 * 1024 * 1024
 
 
-def decode_result(payload: bytes, metadata: dict, arguments: dict) -> dict:
+def decode_result(payload: bytes, metadata: dict, arguments: dict, *, request_id=None, job_id=None) -> dict:
     try:
         value = decode_payload(payload, maximum_bytes=MAX_RESULT_BYTES, maximum_nodes=1_000_000)
         expected = {"schema", "engine", "model", "language", "segments", "task",
                     "engine_revision", "model_revision", "duration_ms", "text", "output_format", "output"}
         if arguments['task'] == 'diarize':
             expected.add('diarization')
+        if 'attestation' in arguments:
+            expected.update({'model_sha256', 'receipt_enforced', 'attestation'})
         if set(value) != expected or value["schema"] != RESULT_SCHEMA:
             raise ValueError("invalid result population")
         if (type(value["engine"]) is not dict or set(value["engine"]) != {"id"}
@@ -32,6 +34,16 @@ def decode_result(payload: bytes, metadata: dict, arguments: dict) -> dict:
                 raise ValueError("result metadata mismatch")
         if value["task"] != arguments["task"] or value["output_format"] != arguments["output"]:
             raise ValueError("result request mismatch")
+        if 'attestation' in arguments:
+            from .attestation import validate
+            digest = value['model_sha256']
+            if (type(digest) is not str or len(digest) != 64 or any(c not in '0123456789abcdef' for c in digest)
+                    or value['receipt_enforced'] is not True):
+                raise ValueError('invalid managed model evidence')
+            validate(value['attestation'], arguments, request_id, job_id)
+            for name in ('model_sha256', 'receipt_enforced', 'attestation'):
+                if type(metadata.get(name)) is not type(value[name]) or metadata[name] != value[name]:
+                    raise ValueError('managed result metadata mismatch')
         segments = []
         for segment in value["segments"]:
             required = {"segment_id", "revision", "start_ms", "end_ms", "text", "stable", "words"}

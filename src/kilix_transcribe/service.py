@@ -10,6 +10,8 @@ from pathlib import Path
 import select
 import socket
 import stat
+import struct
+import copy
 import tempfile
 import threading
 import time
@@ -21,6 +23,7 @@ from .protocol import (
 )
 from .runtime import InstalledRuntime, MAX_INPUT_BYTES, MAX_RESULT_BYTES, private_directory, run_job
 from .results import decode_result
+from .attestation import FEATURE as MANAGED_FEATURE, MINOR as MANAGED_MINOR, ManagedPeer, ManagedResult
 from .streaming import STREAM_FEATURE, STREAM_LIMITS, MAX_UPDATES, SEND_TIMEOUT, SegmentStream
 
 SOCKET_NAME = "kilix-transcribe.sock"
@@ -55,6 +58,7 @@ def _reply(request: ProviderRequest, kind: str, result: dict) -> dict:
 class Service:
     def __init__(self, runtime: InstalledRuntime, directory: Path, *, execution_policy=None):
         self.runtime = runtime
+        self.service_instance = uuid.uuid4().hex
         self.execution_policy = execution_policy
         self._unavailable = False
         self.directory = private_directory(directory)
@@ -65,6 +69,14 @@ class Service:
         self._jobs: dict[str, threading.Event] = {}
         self._slots = threading.BoundedSemaphore(8)
         self._threads: list[threading.Thread] = []
+
+    def _managed(self, selection=None):
+        from .content import InstalledModel
+        if (type(self.runtime) is not InstalledRuntime or
+                type(self.runtime.model_source) is not InstalledModel):
+            raise ProtocolError('INVALID_RUNTIME', 'managed installed model is required')
+        if selection is not None and selection['service_instance'] != self.service_instance:
+            raise ProtocolError('INCOMPATIBLE_PROTOCOL', 'managed service instance changed')
 
     def stop(self) -> None:
         self.stopping.set()
@@ -166,6 +178,9 @@ class Service:
             value, descriptors = receive_packet(channel)
             request = ProviderRequest.from_payload(value)
             deadline = started + request.deadline_ms / 1000
+            managed = 'attestation' in request.arguments
+            if managed:
+                self._managed(request.arguments['attestation'])
             if request.operation == "submit":
                 if request.arguments["audio"]["byte_length"] > MAX_INPUT_BYTES:
                     raise ProtocolError("LIMIT_EXCEEDED", "input exceeds runtime bound")
@@ -183,11 +198,18 @@ class Service:
             descriptors = ()
             if request.operation == "hello":
                 result = {"protocol_major": 1, "protocol_minor": 0}
-                if "features" in request.arguments:
+                if request.arguments.get('features') == [MANAGED_FEATURE]:
+                    self._managed()
+                    result.update(protocol_minor=MANAGED_MINOR, features=[MANAGED_FEATURE],
+                                  service_instance=self.service_instance)
+                elif "features" in request.arguments:
                     result.update(protocol_minor=1, features=[STREAM_FEATURE], limits=STREAM_LIMITS)
                 kind = "hello"
             elif request.operation == "models":
-                result = {"models": [self.runtime.model_record()]}
+                record = self.runtime.model_record()
+                if managed:
+                    record.update(model_sha256=self.runtime.manifest['files']['model.bin'], receipt_enforced=True)
+                result = {"models": [record]}
                 kind = "models"
             elif request.operation == "status":
                 with self._mutex:
@@ -243,11 +265,23 @@ class Service:
                                  deadline=deadline, cancel=cancellation,
                                  execution_policy=self.execution_policy, job_id=request.job_id, progress=queued,
                                  updates=update if streaming else None,
-                                 disconnected=lambda: self.stopping.is_set() or _closed(channel))
+                                 disconnected=lambda: self.stopping.is_set() or _closed(channel),
+                                 **({'request_id': request.request_id} if managed else {}))
+                if managed:
+                    if not isinstance(result, ManagedResult):
+                        raise ProtocolError('INVALID_RUNTIME', 'managed job evidence is absent')
+                    def delivery_check():
+                        if cancellation.is_set() or self.stopping.is_set() or _closed(channel):
+                            raise ProtocolError('CANCELED', 'consumer stopped before managed delivery')
+                        if time.monotonic() >= deadline:
+                            raise ProtocolError('DEADLINE_EXCEEDED', 'managed delivery deadline exceeded')
+                    result.recheck(delivery_check)
                 # Long transcripts use the same bounded descriptor mechanism
                 # as audio. No transcript is retained after the connection.
                 payload = json.dumps(result, allow_nan=False, ensure_ascii=False,
                                      separators=(",", ":"), sort_keys=True).encode()
+                if len(payload) > MAX_RESULT_BYTES:
+                    raise ProtocolError('LIMIT_EXCEEDED', 'transcript exceeds its bound')
                 if streaming:
                     channel.settimeout(min(SEND_TIMEOUT, max(0.001, deadline - time.monotonic())))
                 with tempfile.TemporaryFile() as writer:
@@ -261,6 +295,12 @@ class Service:
                                     "engine_revision": self.runtime.manifest["engine_revision"],
                                     "model_revision": self.runtime.model_revision,
                                     "duration_ms": result["duration_ms"]}
+                        if managed:
+                            metadata.update({k: result[k] for k in ('model_sha256', 'receipt_enforced', 'attestation')})
+                            # Use the job snapshot identities, never mutable post-job runtime state.
+                            metadata.update(engine_id=result['engine']['id'], model_id=result['model']['id'],
+                                            engine_revision=result['engine_revision'], model_revision=result['model_revision'])
+                            result.recheck(delivery_check)
                         finish_job()
                         send_packet(channel, _reply(request, "result", metadata), result_fd)
                     finally:
@@ -314,7 +354,47 @@ def negotiate_stream(directory: Path, *, timeout=1):
     return response
 
 
-def client_request(directory: Path, value: dict, descriptor: int | None = None, *, cancelled=None, on_update=None) -> dict:
+def _endpoint(path):
+    try:
+        info = path.lstat()
+    except OSError as error:
+        raise ProtocolError('UNAUTHORIZED_PEER', 'provider endpoint disappeared') from error
+    return info.st_dev, info.st_ino, info.st_ctime_ns
+
+
+def negotiate_managed(directory: Path, *, timeout=1) -> ManagedPeer:
+    """Pin negotiation to this endpoint inode, peer credentials and service instance."""
+    peer = []
+    try:
+        response = client_request(directory, request_value('hello', timeout=timeout, args={
+            'protocol_major': 1, 'protocol_minor': MANAGED_MINOR, 'features': [MANAGED_FEATURE]}),
+            _peer_info=peer)
+    except ProtocolError as error:
+        if error.code in {'INVALID_REQUEST', 'INCOMPATIBLE_PROTOCOL'}:
+            raise ProtocolError('INCOMPATIBLE_PROTOCOL', 'managed-job feature unavailable') from error
+        raise
+    from .attestation import selection
+    if (set(response) != {'protocol_major', 'protocol_minor', 'features', 'service_instance'} or
+            type(response.get('protocol_major')) is not int or response['protocol_major'] != 1 or
+            type(response.get('protocol_minor')) is not int or response['protocol_minor'] != MANAGED_MINOR or
+            response.get('features') != [MANAGED_FEATURE]):
+        raise ProtocolError('INCOMPATIBLE_PROTOCOL', 'managed-job negotiation failed')
+    selection({'feature': MANAGED_FEATURE, 'service_instance': response['service_instance']})
+    return ManagedPeer(str(directory), peer[0][0], peer[0][1], response['service_instance'])
+
+
+def client_request(directory: Path, value: dict, descriptor: int | None = None, *, cancelled=None, on_update=None,
+                   managed: ManagedPeer | None = None, _peer_info=None) -> dict:
+    ProviderRequest.from_payload(value)
+    if managed is not None:
+        if type(managed) is not ManagedPeer or managed.directory != str(directory) or value.get('op') not in {'submit', 'models'}:
+            raise ProtocolError('INVALID_REQUEST', 'managed peer does not bind this request')
+        value = copy.deepcopy(value)
+        if 'attestation' in value['args']:
+            raise ProtocolError('INVALID_REQUEST', 'managed selection is client-owned')
+        value['args']['attestation'] = {'feature': MANAGED_FEATURE, 'service_instance': managed.service_instance}
+    elif 'attestation' in value.get('args', {}):
+        raise ProtocolError('INCOMPATIBLE_PROTOCOL', 'managed requests require explicit peer negotiation')
     ProviderRequest.from_payload(value)
     streaming = value["args"].get("stream") == STREAM_FEATURE
     if on_update is not None and (not callable(on_update) or value["op"] != "submit" or not streaming):
@@ -337,6 +417,9 @@ def client_request(directory: Path, value: dict, descriptor: int | None = None, 
     info = path.lstat()
     if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o177:
         raise ProtocolError("UNAUTHORIZED_PEER", "unsafe provider endpoint")
+    endpoint = _endpoint(path)
+    if managed is not None and endpoint != managed.endpoint:
+        raise ProtocolError('UNAUTHORIZED_PEER', 'managed endpoint was replaced')
     deadline = time.monotonic() + value["deadline_ms"] / 1000
     state = SegmentStream(value["args"]["task"]) if streaming else None
     accepted = False
@@ -350,6 +433,11 @@ def client_request(directory: Path, value: dict, descriptor: int | None = None, 
                 raise ProtocolError('CANCELED', 'job canceled before submission') from error
             raise ProtocolError('TRANSPORT_ERROR', 'provider connection failed') from error
         require_same_uid_peer(channel)
+        credentials = struct.unpack('3i', channel.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+        if _endpoint(path) != endpoint or (managed is not None and credentials != managed.credentials):
+            raise ProtocolError('UNAUTHORIZED_PEER', 'managed endpoint identity changed')
+        if _peer_info is not None:
+            _peer_info.append((endpoint, credentials))
         if cancellation_requested():
             raise ProtocolError('CANCELED', 'job canceled before submission')
         remaining = deadline - time.monotonic()
@@ -429,7 +517,10 @@ def client_request(directory: Path, value: dict, descriptor: int | None = None, 
                 if event.get("type") == "result":
                     if value["op"] != "submit":
                         raise ProtocolError("INVALID_RESPONSE", "unexpected transcript result")
-                    if set(result) != {"transcript", "engine_id", "engine_revision", "model_id", "model_revision", "duration_ms"}:
+                    population = {"transcript", "engine_id", "engine_revision", "model_id", "model_revision", "duration_ms"}
+                    if managed is not None:
+                        population.update({'model_sha256', 'receipt_enforced', 'attestation'})
+                    if set(result) != population:
                         raise ProtocolError("INVALID_RESPONSE", "invalid result metadata population")
                     metadata = result.get("transcript")
                     if (len(descriptors) != 1 or type(metadata) is not dict
@@ -450,7 +541,9 @@ def client_request(directory: Path, value: dict, descriptor: int | None = None, 
                     payload = os.pread(fd, MAX_RESULT_BYTES + 1, 0)
                     if len(payload) != info.st_size or hashlib.sha256(payload).hexdigest() != metadata["sha256"]:
                         raise ProtocolError("DESCRIPTOR_MISMATCH", "transcript digest mismatch")
-                    decoded = decode_result(payload, result, value["args"])
+                    decoded = decode_result(payload, result, value["args"],
+                                            **({'request_id': value['request_id'], 'job_id': value.get('job_id')}
+                                               if managed is not None else {}))
                     if streaming:
                         if not accepted:
                             raise ProtocolError("INCOMPATIBLE_PROTOCOL", "missing streaming acceptance")
@@ -459,6 +552,8 @@ def client_request(directory: Path, value: dict, descriptor: int | None = None, 
                         raise ProtocolError("CANCELED", "job canceled before delivery")
                     if time.monotonic() >= deadline:
                         raise ProtocolError("DEADLINE_EXCEEDED", "provider deadline exceeded before delivery")
+                    if managed is not None and _endpoint(path) != managed.endpoint:
+                        raise ProtocolError('UNAUTHORIZED_PEER', 'managed endpoint changed before delivery')
                     return decoded
                 expected = {"hello": "hello", "status": "status", "models": "models",
                             "unload": "unloaded", "cancel": "canceled"}.get(value["op"])
@@ -466,6 +561,8 @@ def client_request(directory: Path, value: dict, descriptor: int | None = None, 
                     raise ProtocolError("INVALID_RESPONSE", "unexpected provider response")
                 if time.monotonic() >= deadline:
                     raise ProtocolError("DEADLINE_EXCEEDED", "provider deadline exceeded before delivery")
+                if (managed is not None or _peer_info is not None) and _endpoint(path) != endpoint:
+                    raise ProtocolError('UNAUTHORIZED_PEER', 'endpoint changed before delivery')
                 return result
             finally:
                 for received in descriptors:

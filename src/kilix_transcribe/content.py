@@ -98,6 +98,16 @@ class InstalledModel:
             raise ProtocolError("INVALID_RUNTIME", "installed model and runtime identities differ")
         self._bound = True
 
+    def require_authorized(self, check):
+        """Recheck the same bound receipt authority before attested delivery."""
+        check()
+        try:
+            self._license.require(self.reference, records=self.records, store=self.store)
+        except self._errors as error:
+            check()
+            raise ProtocolError("INVALID_RUNTIME", "installed model receipt is unavailable") from error
+        check()
+
     @contextmanager
     def open(self, check):
         """Receipts and the full installed population are rechecked for every job."""
