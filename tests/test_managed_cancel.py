@@ -1,6 +1,7 @@
 """Regression for103-T061A-CANCEL-PEER and same-ID job-generation isolation."""
 from dataclasses import replace
 import os
+import copy
 import socket
 import threading
 import time
@@ -129,6 +130,68 @@ class ManagedCancelTests(unittest.TestCase):
                                             target_job_instance=accepted[0]['job_instance']))
         f.stop();pid=int((f.installation/'escaped.pid').read_text())
         with self.assertRaises(ProcessLookupError):os.kill(pid,0)
+
+
+@unittest.skipUnless(test_content.CONTENT_AVAILABLE,'Content/License packages required')
+class ManagedCancelAckSnapshotTests(unittest.TestCase):
+    """Caller alias mutation must neither authorize a different ACK nor reject a correct one."""
+    setup_runtime=test_content_runtime.ContentRuntimeTests.setup_runtime
+
+    def test_mutated_caller_cannot_authorize_malformed_ack(self):
+        self.check_snapshot(corrupt_ack=True)
+
+    def test_honest_ack_survives_caller_target_mutation(self):
+        self.check_snapshot(corrupt_ack=False)
+
+    def check_snapshot(self, *, corrupt_ack):
+        f,_installed,_source,_rt=self.setup_runtime('escape')
+        peer=service.negotiate_managed(f.ipc)
+        value=f.value(job='ack-snapshot',timeout=10)
+        wire=copy.deepcopy(value)
+        wire['args']['attestation']=dict(feature=FEATURE,service_instance=peer.service_instance)
+        with socket.socket(socket.AF_UNIX,socket.SOCK_SEQPACKET) as channel:
+            channel.settimeout(5);channel.connect(str(f.ipc/service.SOCKET_NAME))
+            with f.audio.open('rb') as audio:send_packet(channel,wire,audio.fileno())
+            accepted,fds=receive_packet(channel)
+            self.assertEqual(fds,());self.assertEqual(accepted['type'],'accepted')
+            target=dict(request_id=value['request_id'],job_instance=accepted['result']['job_instance'])
+            sent_target=dict(target)
+            marker=f.installation/'escaped.pid';deadline=time.monotonic()+4
+            while not marker.exists() and time.monotonic()<deadline:time.sleep(.01)
+            self.assertTrue(marker.exists());pid=int(marker.read_text())
+            original_send=service.send_packet;sent=[];mutations=[]
+            def changed_after_send(sock,event,descriptor=None):
+                if corrupt_ack and event.get('type')=='canceled':
+                    target.update(request_id='changed-request',job_instance='a'*32)
+                    event=copy.deepcopy(event)
+                    event['result'].update(target_request_id=target['request_id'],
+                                           target_job_instance=target['job_instance'])
+                    mutations.append(True)
+                result=original_send(sock,event,descriptor)
+                if event.get('op')=='cancel':
+                    sent.append(copy.deepcopy(event['args']))
+                    if not corrupt_ack:
+                        target.update(request_id='changed-request',job_instance='b'*32)
+                        mutations.append(True)
+                return result
+            with patch.object(service,'send_packet',changed_after_send):
+                cancel=service.request_value('cancel',job_id=value['job_id'],timeout=2)
+                if corrupt_ack:
+                    with self.assertRaises(ProtocolError) as error:
+                        service.client_request(f.ipc,cancel,managed=peer,cancel_target=target)
+                    self.assertEqual(error.exception.code,'INVALID_RESPONSE')
+                else:
+                    ack=service.client_request(f.ipc,cancel,managed=peer,cancel_target=target)
+                    self.assertEqual(ack,dict(cancel_requested=True,target_request_id=sent_target['request_id'],
+                                             target_job_instance=sent_target['job_instance'],
+                                             service_instance=peer.service_instance))
+            self.assertEqual(len(sent),1);self.assertEqual(mutations,[True])
+            self.assertEqual(sent[0]['target_request_id'],sent_target['request_id'])
+            self.assertEqual(sent[0]['target_job_instance'],sent_target['job_instance'])
+            self.assertNotEqual(target,sent_target)
+            terminal,fds=receive_packet(channel);self.assertEqual(fds,())
+            self.assertEqual(terminal['error']['code'],'CANCELED')
+            with self.assertRaises(ProcessLookupError):os.kill(pid,0)
 
 
 class ManagedCancelValidationTests(unittest.TestCase):

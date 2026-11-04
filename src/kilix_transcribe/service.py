@@ -610,8 +610,10 @@ def client_request(directory: Path, value: dict, descriptor: int | None = None, 
                 if managed is not None and value['op'] == 'cancel':
                     if (set(result) != {'cancel_requested', 'target_request_id', 'target_job_instance', 'service_instance'}
                             or type(result['cancel_requested']) is not bool
-                            or result['target_request_id'] != cancel_target['request_id']
-                            or result['target_job_instance'] != cancel_target['job_instance']
+                            # Bind to the private, validated request that was sent,
+                            # never the caller's potentially mutated mapping.
+                            or result['target_request_id'] != value['args']['target_request_id']
+                            or result['target_job_instance'] != value['args']['target_job_instance']
                             or result['service_instance'] != managed.service_instance):
                         raise ProtocolError('INVALID_RESPONSE', 'unbound managed cancellation acknowledgement')
                 if (managed is not None or _peer_info is not None) and _endpoint(path) != endpoint:

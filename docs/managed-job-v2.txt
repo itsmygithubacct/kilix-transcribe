@@ -95,3 +95,12 @@ client_request(...,managed=peer,cancelled=callback) handles this internally. For
 an explicit control call, supply managed=peer and cancel_target={request_id:ID,
 job_instance:TOKEN} obtained from that job's acceptance; its wire fields remain
 client-owned. The Tiny consumer needs no new cancellation retry or fallback.
+
+ACK snapshot correction (103-W103A-CANCEL-ACK-TARGET)
+
+The manual cancel_target mapping remains caller-owned. After validation the
+client copies its scalar IDs into its private request. Cancellation ACKs are
+checked against those exact sent request fields, never a later read of the
+caller mapping. Changing that mapping after serialization cannot authorize a
+different-target ACK or invalidate the provider's honest ACK. No wire version,
+feature fields, target matching, cancellation effect or legacy behavior changes.
