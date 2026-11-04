@@ -8,7 +8,7 @@ from .surface import RESULT_SCHEMA, SegmentUpdate, SurfaceError, Transcript, Wor
 MAX_RESULT_BYTES = 16 * 1024 * 1024
 
 
-def decode_result(payload: bytes, metadata: dict, arguments: dict, *, request_id=None, job_id=None) -> dict:
+def decode_result(payload: bytes, metadata: dict, arguments: dict, *, request_id=None, job_id=None, job_instance=None) -> dict:
     try:
         value = decode_payload(payload, maximum_bytes=MAX_RESULT_BYTES, maximum_nodes=1_000_000)
         expected = {"schema", "engine", "model", "language", "segments", "task",
@@ -40,7 +40,7 @@ def decode_result(payload: bytes, metadata: dict, arguments: dict, *, request_id
             if (type(digest) is not str or len(digest) != 64 or any(c not in '0123456789abcdef' for c in digest)
                     or value['receipt_enforced'] is not True):
                 raise ValueError('invalid managed model evidence')
-            validate(value['attestation'], arguments, request_id, job_id)
+            validate(value['attestation'], arguments, request_id, job_id, job_instance)
             for name in ('model_sha256', 'receipt_enforced', 'attestation'):
                 if type(metadata.get(name)) is not type(value[name]) or metadata[name] != value[name]:
                     raise ValueError('managed result metadata mismatch')

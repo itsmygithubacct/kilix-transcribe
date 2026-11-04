@@ -1,0 +1,97 @@
+Managed job feature: protocol1.3 / managed-job-v2
+
+This optional extension is separate from segments-v1. Default hello remains
+{protocol_major:1,protocol_minor:0}; a segments-v1 hello still returns exactly
+its original1.1 fields/limits. No unnegotiated models record, result envelope or
+result document gains fields. Legacy clients retain strict field populations.
+
+Client API (all calls use the same absolute private runtime directory):
+  peer = negotiate_managed(directory, timeout=1)
+  models = client_request(directory, request_value('models'), managed=peer)
+  result = client_request(directory, request_value('submit', job_id=job_id,
+      args=original_audio_arguments, timeout=timeout), audio_fd, managed=peer)
+
+negotiate_managed sends hello with protocol_major1,protocol_minor3,
+features['managed-job-v2']. The response contains exactly protocol_major1,
+protocol_minor3,that features list,and service_instance (32lowercase hex).
+ManagedPeer also records the local socket device/inode/ctime and SO_PEERCRED.
+It is a local connection pin, not a wire credential or licence permission.
+Each subsequent managed models/submit call uses that pin and injects args:
+  attestation:{feature:'managed-job-v2',service_instance:NEGOTIATED_INSTANCE}
+The caller's original request is not mutated. Direct manual extension fields
+without a ManagedPeer are refused by the client API. The server requires the
+same live service instance and an actual InstalledRuntime/InstalledModel route;
+unmanaged runtimes refuse. Managed submits support final transcribe/translate
+only. Streaming or diarization combinations explicitly refuse in this version.
+
+Negotiated models records additionally expose model_sha256 and receipt_enforced
+true. These records describe configuration; they are not per-job authorization.
+A per-job open still validates the real receipt, full installed population and
+sealed descriptor, binds the selected catalog asset/revision, and hashes the
+actual sealed model descriptor passed to that worker. Engine/model revisions
+come from the same copied job manifest whose tool snapshots are verified.
+Worker-reported fields cannot supply managed evidence. The parent validates
+worker identity and attaches model_sha256,receipt_enforced:true and:
+  attestation:{feature:'managed-job-v2',service_instance:INSTANCE,
+      request_id:REQUEST_ID,job_id:JOB_ID,audio_sha256:REQUEST_AUDIO_SHA256,
+      job_instance:ACCEPTED_JOB_INSTANCE}
+These three extension fields appear both in result control metadata and the
+hashed result document. The strict decoder requires identical fields/types,
+canonical model SHA,receipt_enforced exactly true,and exact request/job/audio/
+instance binding. Existing engine/model/revision/duration/output checks remain.
+The consumer must additionally require its intended exact engine/model tuple.
+
+The original InstalledModel authority is retained internally through delivery.
+Receipt coverage is rechecked after the worker, and again before final sending;
+revocation at those checks refuses. It is not a perpetual grant or an atomic
+transaction with later receipt-store changes after sending. Sealed snapshots
+remain authoritative when installed source paths change after copying; the next
+job rejects changed installed bytes. Cancellation/deadline checks still run in
+snapshotting, execution and attested delivery. Supervisor cleanup must finish
+before a provider terminal event. A local client cancellation can close earlier
+and does not itself prove provider cleanup. Descriptors close on all paths.
+
+Endpoint inode/ctime and peer credentials are checked before sending descriptors
+and before returning results. A restarted/replaced endpoint requires explicit
+new negotiation. The instance check also refuses stale selections when a new
+service uses the same endpoint. This is local trusted-producer evidence, not a
+cryptographic attestation of arbitrary same-UID code or an executable measurement.
+An attacker controlling the user or replacing the trusted producer implementation
+can fabricate claims; operator-selected source/runtime provenance and independent
+admission remain required. No live service, model install or receipt is created.
+
+Cancellation isolation (repair for103-T061A-CANCEL-PEER)
+
+The rejected1.2/managed-job-v1 peer is incompatible with this client; there is no
+silent negotiation fallback. Transport1.0 and segments-v1 remain unchanged.
+Managed submit acceptance contains exactly service_instance and a producer-random
+32hex job_instance. The client retains this token for that connection; final
+managed evidence must match it. Job ID and request ID can both be reused by a
+caller, but each admitted job gets a fresh producer token. No unbounded history
+or retry registry is retained; only the active job record exists.
+
+The cancellation callback uses the same ManagedPeer for the secondary control
+connection: endpoint identity is checked before connection and again with actual
+SO_PEERCRED after connection, before send. A replaced/missing/unverifiable peer
+refuses and propagates the error; it never falls back to an unpinned request or
+renegotiates automatically. Closing the original job channel still triggers owned
+cleanup. If cancellation occurs before a job token has been received, no cancel
+RPC is sent; the original channel closes. Its local CANCELED outcome is not proof
+that provider cleanup has completed. A changed endpoint still returns
+UNAUTHORIZED_PEER at that boundary, without contacting its replacement.
+
+Managed control args are exactly attestation:{feature,service_instance},
+target_request_id and target_job_instance, plus the normal envelope job_id. The
+server requires its own instance and matches all three job identifiers against
+the active managed job before setting cancellation. A stale target returns
+STALE_JOB without touching the active worker. An unnegotiated legacy cancel of
+an active managed job refuses; legacy cancellation of legacy jobs is unchanged.
+No active matching job returns cancel_requested:false. The managed ACK binds
+cancel_requested(boolean),target_request_id,target_job_instance,service_instance;
+it acknowledges the request, not completed cleanup. Provider terminal events
+still follow owned descendant reaping.
+
+client_request(...,managed=peer,cancelled=callback) handles this internally. For
+an explicit control call, supply managed=peer and cancel_target={request_id:ID,
+job_instance:TOKEN} obtained from that job's acceptance; its wire fields remain
+client-owned. The Tiny consumer needs no new cancellation retry or fallback.

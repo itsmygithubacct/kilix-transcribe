@@ -268,7 +268,16 @@ class ProviderRequest:
         arguments = value["args"]
         _require(type(arguments) is dict, "INVALID_REQUEST", "args must be an object")
         _walk_forbidden(arguments)
-        if operation == "models" and arguments:
+        if operation == "cancel" and arguments:
+            from .attestation import selection
+            _require(set(arguments) == {"attestation", "target_request_id", "target_job_instance"},
+                     "INVALID_REQUEST", "invalid managed cancellation")
+            selection(arguments["attestation"])
+            _identity(arguments["target_request_id"], "target_request_id")
+            token = arguments['target_job_instance']
+            _require(type(token) is str and len(token) == 32 and all(c in '0123456789abcdef' for c in token),
+                     'INVALID_REQUEST', 'invalid managed job instance')
+        elif operation == "models" and arguments:
             from .attestation import selection
             _require(set(arguments) == {"attestation"}, "INVALID_REQUEST", "invalid managed models request")
             selection(arguments["attestation"])
@@ -287,7 +296,7 @@ class ProviderRequest:
             if "features" in arguments:
                 _require(arguments["protocol_minor"] >= 1
                          and (arguments["features"] == [STREAM_FEATURE] or
-                              (arguments["protocol_minor"] >= 2 and arguments["features"] == ["managed-job-v1"])),
+                              (arguments["protocol_minor"] >= 3 and arguments["features"] == ["managed-job-v2"])),
                          "INCOMPATIBLE_PROTOCOL", "streaming feature negotiation is incompatible")
         else:
             cls._validate_submit(arguments)

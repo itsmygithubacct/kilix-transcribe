@@ -47,7 +47,9 @@ class ManagedAttestationTests(unittest.TestCase):
         self.assertEqual(result['model_sha256'],rt.manifest['files']['model.bin'])
         self.assertIs(result['receipt_enforced'],True)
         self.assertEqual(result['attestation'],dict(feature=FEATURE,service_instance=peer.service_instance,
-            request_id=value['request_id'],job_id=value['job_id'],audio_sha256=value['args']['audio']['sha256']))
+            request_id=value['request_id'],job_id=value['job_id'],audio_sha256=value['args']['audio']['sha256'],
+            job_instance=result['attestation']['job_instance']))
+        self.assertEqual(len(result['attestation']['job_instance']),32)
         self.assertNotIn('attestation',value['args']) # no mutation of caller request
 
     def test_revoked_receipt_before_job(self):
@@ -179,12 +181,13 @@ class ManagedAttestationTests(unittest.TestCase):
         metadata=dict(engine_id=result['engine']['id'],model_id=result['model']['id'],
             **{k:result[k] for k in ('engine_revision','model_revision','duration_ms','model_sha256','receipt_enforced','attestation')})
         def decode(doc,meta=metadata,args=args):
-            return decode_result(json.dumps(doc).encode(),meta,args,request_id=value['request_id'],job_id=value['job_id'])
+            return decode_result(json.dumps(doc).encode(),meta,args,request_id=value['request_id'],job_id=value['job_id'],job_instance=result['attestation']['job_instance'])
         self.assertEqual(decode(result),result)
         for mutate in [lambda d:d.pop('attestation'),lambda d:d.update(receipt_enforced=1),
             lambda d:d.update(model_sha256='z'*64),lambda d:d['attestation'].update(request_id='wrong'),
             lambda d:d['attestation'].update(job_id='wrong'),lambda d:d['attestation'].update(audio_sha256='0'*64),
-            lambda d:d['attestation'].update(service_instance='0'*32),lambda d:d.update(extra=True)]:
+            lambda d:d['attestation'].update(service_instance='0'*32),
+            lambda d:d['attestation'].update(job_instance='0'*32),lambda d:d.update(extra=True)]:
             doc=copy.deepcopy(result);mutate(doc)
             with self.assertRaises(ProtocolError):decode(doc)
         with self.assertRaises(ProtocolError):decode(result,args=value['args']) # legacy remains strict
@@ -217,5 +220,5 @@ class UnmanagedNegotiationTests(unittest.TestCase):
         for features,minor in [([FEATURE],1),([FEATURE,'unknown'],2),(['unknown'],2)]:
             with self.assertRaises(ProtocolError):service.request_value('hello',args={
                 'protocol_major':1,'protocol_minor':minor,'features':features})
-        valid=service.request_value('hello',args={'protocol_major':1,'protocol_minor':2,'features':[FEATURE]})
+        valid=service.request_value('hello',args={'protocol_major':1,'protocol_minor':3,'features':[FEATURE]})
         self.assertEqual(ProviderRequest.from_payload(valid).operation,'hello')

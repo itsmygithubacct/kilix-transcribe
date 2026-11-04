@@ -272,15 +272,15 @@ def stop_process(process: subprocess.Popen) -> None:
 def run_job(runtime: InstalledRuntime, audio_fd: int, args: dict, *,
             deadline: float, cancel: threading.Event,
             disconnected: Callable[[], bool] = lambda: False,
-            execution_policy=None, job_id=None, progress=None, updates=None, request_id=None) -> dict:
+            execution_policy=None, job_id=None, progress=None, updates=None, request_id=None, job_instance=None) -> dict:
     from .owned import OwnedExecution
     with OwnedExecution(execution_policy, job_id=job_id, workload="stt-job", deadline=deadline,
                         cancelled=cancel.is_set, disconnected=disconnected, progress=progress) as owner:
         return _run_owned_job(runtime, audio_fd, args, deadline=deadline, cancel=cancel,
-                              disconnected=disconnected, owner=owner, updates=updates, request_id=request_id, job_id=job_id)
+                              disconnected=disconnected, owner=owner, updates=updates, request_id=request_id, job_id=job_id, job_instance=job_instance)
 
 
-def _run_owned_job(runtime, audio_fd, args, *, deadline, cancel, disconnected, owner, updates=None, request_id=None, job_id=None):
+def _run_owned_job(runtime, audio_fd, args, *, deadline, cancel, disconnected, owner, updates=None, request_id=None, job_id=None, job_instance=None):
     if cancel.is_set() or disconnected():
         raise ProtocolError("CANCELED", "job canceled")
     if time.monotonic() >= deadline:
@@ -326,7 +326,7 @@ def _run_owned_job(runtime, audio_fd, args, *, deadline, cancel, disconnected, o
             value = dict(result, model_sha256=runtime_fds.model_sha256, receipt_enforced=True,
                          attestation={'feature': FEATURE,
                                       'service_instance': args['attestation']['service_instance'],
-                                      'request_id': request_id, 'job_id': job_id,
+                                      'request_id': request_id, 'job_id': job_id, 'job_instance': job_instance,
                                       'audio_sha256': args['audio']['sha256']})
             return ManagedResult(value, authority.require_authorized)
         if 'attestation' in args and runtime_fds.authority is None:

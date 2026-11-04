@@ -67,6 +67,7 @@ class Service:
         self.ready = threading.Event()
         self._mutex = threading.Lock()
         self._jobs: dict[str, threading.Event] = {}
+        self._job_requests: dict[str, tuple[str, bool, str | None]] = {}
         self._slots = threading.BoundedSemaphore(8)
         self._threads: list[threading.Thread] = []
 
@@ -170,6 +171,7 @@ class Service:
             if claimed:
                 with self._mutex:
                     self._jobs.pop(request.job_id, None)
+                    self._job_requests.pop(request.job_id, None)
                     claimed = False
 
         try:
@@ -191,6 +193,8 @@ class Service:
                         raise ProtocolError("BUSY", "speech worker is busy")
                     cancellation = threading.Event()
                     self._jobs[request.job_id] = cancellation
+                    job_instance = uuid.uuid4().hex if managed else None
+                    self._job_requests[request.job_id] = (request.request_id, managed, job_instance)
                     claimed = True
             snapshot = verify_request_descriptors(request, descriptors)
             for descriptor in descriptors:
@@ -223,10 +227,21 @@ class Service:
                 with self._mutex:
                     cancellation = self._jobs.get(request.job_id)
                     if cancellation is not None:
+                        target_id, target_managed, target_instance = self._job_requests[request.job_id]
+                        if managed:
+                            if (not target_managed or request.arguments['target_request_id'] != target_id
+                                    or request.arguments['target_job_instance'] != target_instance):
+                                raise ProtocolError('STALE_JOB', 'managed cancellation targets a different request')
+                        elif target_managed:
+                            raise ProtocolError('INCOMPATIBLE_PROTOCOL', 'managed job needs pinned cancellation')
                         cancellation.set()
                 # This acknowledges a request; terminal CANCELED is emitted on
                 # the original job only after its worker has been reaped.
                 result = {"cancel_requested": cancellation is not None}
+                if managed:
+                    result.update(target_request_id=request.arguments['target_request_id'],
+                                  target_job_instance=request.arguments['target_job_instance'],
+                                  service_instance=self.service_instance)
                 kind = "canceled"
             elif request.operation == "unload":
                 with self._mutex:
@@ -240,8 +255,9 @@ class Service:
                 streaming = request.arguments.get("stream") == STREAM_FEATURE
                 remaining = max(0.001, deadline - time.monotonic())
                 channel.settimeout(min(SEND_TIMEOUT, remaining) if streaming else remaining)
-                send_packet(channel, _reply(request, "accepted", {"stream": STREAM_FEATURE,
-                    "limits": STREAM_LIMITS} if streaming else {}))
+                acceptance = {'service_instance': self.service_instance, 'job_instance': job_instance} if managed else (
+                    {"stream": STREAM_FEATURE, "limits": STREAM_LIMITS} if streaming else {})
+                send_packet(channel, _reply(request, "accepted", acceptance))
                 def queued(status):
                     remaining = max(0.001, deadline - time.monotonic())
                     channel.settimeout(min(SEND_TIMEOUT, remaining) if streaming else remaining)
@@ -266,7 +282,7 @@ class Service:
                                  execution_policy=self.execution_policy, job_id=request.job_id, progress=queued,
                                  updates=update if streaming else None,
                                  disconnected=lambda: self.stopping.is_set() or _closed(channel),
-                                 **({'request_id': request.request_id} if managed else {}))
+                                 **({'request_id': request.request_id, 'job_instance': job_instance} if managed else {}))
                 if managed:
                     if not isinstance(result, ManagedResult):
                         raise ProtocolError('INVALID_RUNTIME', 'managed job evidence is absent')
@@ -384,15 +400,22 @@ def negotiate_managed(directory: Path, *, timeout=1) -> ManagedPeer:
 
 
 def client_request(directory: Path, value: dict, descriptor: int | None = None, *, cancelled=None, on_update=None,
-                   managed: ManagedPeer | None = None, _peer_info=None) -> dict:
+                   managed: ManagedPeer | None = None, cancel_target: dict | None = None, _peer_info=None) -> dict:
     ProviderRequest.from_payload(value)
+    if cancel_target is not None and (managed is None or value['op'] != 'cancel'):
+        raise ProtocolError('INVALID_REQUEST', 'cancel target requires a managed cancellation')
     if managed is not None:
-        if type(managed) is not ManagedPeer or managed.directory != str(directory) or value.get('op') not in {'submit', 'models'}:
+        if type(managed) is not ManagedPeer or managed.directory != str(directory) or value.get('op') not in {'submit', 'models', 'cancel'}:
             raise ProtocolError('INVALID_REQUEST', 'managed peer does not bind this request')
         value = copy.deepcopy(value)
         if 'attestation' in value['args']:
             raise ProtocolError('INVALID_REQUEST', 'managed selection is client-owned')
         value['args']['attestation'] = {'feature': MANAGED_FEATURE, 'service_instance': managed.service_instance}
+        if value['op'] == 'cancel':
+            if type(cancel_target) is not dict or set(cancel_target) != {'request_id', 'job_instance'}:
+                raise ProtocolError('INVALID_REQUEST', 'managed cancellation needs its accepted job instance')
+            value['args']['target_request_id'] = cancel_target['request_id']
+            value['args']['target_job_instance'] = cancel_target['job_instance']
     elif 'attestation' in value.get('args', {}):
         raise ProtocolError('INCOMPATIBLE_PROTOCOL', 'managed requests require explicit peer negotiation')
     ProviderRequest.from_payload(value)
@@ -423,6 +446,7 @@ def client_request(directory: Path, value: dict, descriptor: int | None = None, 
     deadline = time.monotonic() + value["deadline_ms"] / 1000
     state = SegmentStream(value["args"]["task"]) if streaming else None
     accepted = False
+    managed_job = None
     with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as channel:
         remaining = max(0.001, deadline - time.monotonic())
         channel.settimeout(min(0.2, remaining) if cancelled is not None else remaining)
@@ -455,11 +479,20 @@ def client_request(directory: Path, value: dict, descriptor: int | None = None, 
                         remaining = deadline - time.monotonic()
                         if remaining < 0.001:
                             raise ProtocolError("DEADLINE_EXCEEDED", "provider cancellation deadline exceeded")
+                        if managed is not None and _endpoint(path) != managed.endpoint:
+                            raise ProtocolError('UNAUTHORIZED_PEER', 'managed endpoint changed before cancellation')
                         try:
-                            client_request(directory, request_value("cancel", job_id=value["job_id"],
-                                           timeout=min(0.2, remaining)))
+                            if managed is None or managed_job is not None:
+                                target = {'request_id': value['request_id'], 'job_instance': managed_job}
+                                client_request(directory, request_value("cancel", job_id=value["job_id"],
+                                               timeout=min(0.2, remaining)),
+                                               **({'managed': managed, 'cancel_target': target}
+                                                  if managed is not None else {}))
                         except (ProtocolError, OSError):
-                            pass
+                            if managed is not None:
+                                # A changed/unverifiable peer is a refusal, never
+                                # a legacy fallback or an automatic renegotiation.
+                                raise
                         # Return closes our original channel and descriptors.
                         # Neither local cancellation nor an ACK proves that
                         # the provider has finished its authenticated teardown.
@@ -506,6 +539,19 @@ def client_request(directory: Path, value: dict, descriptor: int | None = None, 
                 if event.get("type") in {"accepted", "queued", "loading", "progress"}:
                     if descriptors or value["op"] != "submit":
                         raise ProtocolError("DESCRIPTOR_MISMATCH", "unexpected progress descriptor")
+                    if managed is not None:
+                        if event['type'] == 'accepted':
+                            acknowledgement = event.get('result')
+                            if (managed_job is not None or type(acknowledgement) is not dict
+                                    or set(acknowledgement) != {'service_instance', 'job_instance'}
+                                    or acknowledgement['service_instance'] != managed.service_instance):
+                                raise ProtocolError('INVALID_RESPONSE', 'invalid managed job acceptance')
+                            token = acknowledgement['job_instance']
+                            if type(token) is not str or len(token) != 32 or any(c not in '0123456789abcdef' for c in token):
+                                raise ProtocolError('INVALID_RESPONSE', 'invalid managed job instance')
+                            managed_job = token
+                        elif managed_job is None:
+                            raise ProtocolError('INVALID_RESPONSE', 'managed progress precedes acceptance')
                     if streaming and event["type"] == "accepted":
                         if accepted or event.get("result") != {"stream": STREAM_FEATURE, "limits": STREAM_LIMITS}:
                             raise ProtocolError("INCOMPATIBLE_PROTOCOL", "peer did not acknowledge streaming")
@@ -542,7 +588,7 @@ def client_request(directory: Path, value: dict, descriptor: int | None = None, 
                     if len(payload) != info.st_size or hashlib.sha256(payload).hexdigest() != metadata["sha256"]:
                         raise ProtocolError("DESCRIPTOR_MISMATCH", "transcript digest mismatch")
                     decoded = decode_result(payload, result, value["args"],
-                                            **({'request_id': value['request_id'], 'job_id': value.get('job_id')}
+                                            **({'request_id': value['request_id'], 'job_id': value.get('job_id'), 'job_instance': managed_job}
                                                if managed is not None else {}))
                     if streaming:
                         if not accepted:
@@ -561,6 +607,13 @@ def client_request(directory: Path, value: dict, descriptor: int | None = None, 
                     raise ProtocolError("INVALID_RESPONSE", "unexpected provider response")
                 if time.monotonic() >= deadline:
                     raise ProtocolError("DEADLINE_EXCEEDED", "provider deadline exceeded before delivery")
+                if managed is not None and value['op'] == 'cancel':
+                    if (set(result) != {'cancel_requested', 'target_request_id', 'target_job_instance', 'service_instance'}
+                            or type(result['cancel_requested']) is not bool
+                            or result['target_request_id'] != cancel_target['request_id']
+                            or result['target_job_instance'] != cancel_target['job_instance']
+                            or result['service_instance'] != managed.service_instance):
+                        raise ProtocolError('INVALID_RESPONSE', 'unbound managed cancellation acknowledgement')
                 if (managed is not None or _peer_info is not None) and _endpoint(path) != endpoint:
                     raise ProtocolError('UNAUTHORIZED_PEER', 'endpoint changed before delivery')
                 return result

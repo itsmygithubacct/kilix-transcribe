@@ -2,8 +2,8 @@
 from dataclasses import dataclass
 from .protocol import ProtocolError
 
-FEATURE = 'managed-job-v1'
-MINOR = 2
+FEATURE = 'managed-job-v2'
+MINOR = 3
 
 
 @dataclass(frozen=True)
@@ -23,9 +23,12 @@ def selection(value):
     return value
 
 
-def validate(value, args, request_id, job_id):
+def validate(value, args, request_id, job_id, job_instance):
+    if (type(job_instance) is not str or len(job_instance) != 32
+            or any(c not in '0123456789abcdef' for c in job_instance)):
+        raise ProtocolError('INVALID_RESPONSE', 'missing accepted managed job instance')
     expected = {'feature': FEATURE, 'service_instance': args['attestation']['service_instance'],
-                'request_id': request_id, 'job_id': job_id,
+                'request_id': request_id, 'job_id': job_id, 'job_instance': job_instance,
                 'audio_sha256': args['audio']['sha256']}
     if type(value) is not dict or value != expected:
         raise ProtocolError('INVALID_RESPONSE', 'unbound managed-job evidence')

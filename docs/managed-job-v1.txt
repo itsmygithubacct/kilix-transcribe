@@ -1,3 +1,7 @@
+HISTORICAL ONLY: rejected45274c6 managed-job-v1. The active successor uses
+managed-job-v2 / protocol1.3; see managed-job-v2.txt. This historical contract
+does not authorize adoption of the rejected cancellation path.
+
 Managed job feature: protocol1.2 / managed-job-v1
 
 This optional extension is separate from segments-v1. Default hello remains
