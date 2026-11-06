@@ -23,8 +23,18 @@ from kilix_transcribe.service import Service, client_request, request_value
 
 
 DECODER = """#!/usr/bin/python3
-import shutil, sys
-shutil.copyfile(sys.argv[sys.argv.index('-i')+1],sys.argv[-1])
+import os, pathlib, shutil, signal, sys, time
+mode = pathlib.Path(FIXTURE_ROOT, "model.bin").read_text()
+dest = sys.argv[-1]
+marker = pathlib.Path(FIXTURE_ROOT, "crashed")
+if mode == "crash-once" and not marker.exists():
+    marker.write_text("1")
+    os.kill(os.getppid(), signal.SIGKILL)
+    time.sleep(30)
+elif mode == "corrupt":
+    pathlib.Path(dest).write_bytes(b"not-wav")
+else:
+    shutil.copyfile(sys.argv[sys.argv.index("-i") + 1], dest)
 """
 ENGINE = """#!/usr/bin/python3
 import json, os, pathlib, signal, subprocess, sys, time
@@ -433,6 +443,23 @@ class RuntimeTests(unittest.TestCase):
         result = self.submit()
         self.assertEqual(result["text"], "")
         self.assertFalse((self.installation / "engine.pid").exists())
+
+    def test_corrupt_audio_is_refused_and_the_service_stays_ready(self):
+        self.start("corrupt")
+        with self.assertRaises(ProtocolError) as raised:
+            self.submit()
+        self.assertEqual(raised.exception.code, "INVALID_REQUEST")
+        self.assertEqual(client_request(self.ipc, request_value("status"))["provider_state"], "ready")
+
+    def test_crashed_worker_is_classified_and_the_next_job_runs(self):
+        self.start("crash-once")
+        with self.assertRaises(ProtocolError) as raised:
+            self.submit(job="crash-job")
+        self.assertEqual(raised.exception.code, "WORKER_CRASH")
+        self.assertEqual(client_request(self.ipc, request_value("status"))["provider_state"], "ready")
+        result = self.submit(job="after-crash")
+        self.assertEqual(result["text"], "Test transcript.\n")
+        self.assertEqual(client_request(self.ipc, request_value("status"))["provider_state"], "ready")
 
 
 if __name__ == "__main__":

@@ -24,6 +24,7 @@ import threading
 import time
 from typing import Callable
 
+from .failure import classify
 from .protocol import ProtocolError, decode_payload
 
 RUNTIME_SCHEMA = "kilix.transcribe.runtime/v1"
@@ -332,6 +333,9 @@ def _run_owned_job(runtime, audio_fd, args, *, deadline, cancel, disconnected, o
                     else:
                         raise ProtocolError("ENGINE_FAILED", "unknown worker stream frame")
                 check()
+                found = classify(process.returncode, workspace)
+                if found is not None:
+                    raise ProtocolError(*found)
                 if process.returncode != 0 or result is None or result.get("engine_revision") != ENGINE_COMMIT:
                     raise ProtocolError("ENGINE_FAILED", "streaming worker failed or ended without a final")
                 return result
@@ -346,6 +350,9 @@ def _run_owned_job(runtime, audio_fd, args, *, deadline, cancel, disconnected, o
                 raise ProtocolError("CANCELED", "job canceled")
             if time.monotonic() >= deadline:
                 raise ProtocolError("DEADLINE_EXCEEDED", "job deadline exceeded")
+            found = classify(process.returncode, workspace)
+            if found is not None:
+                raise ProtocolError(*found)
             if process.returncode != 0:
                 raise ProtocolError("ENGINE_FAILED", "speech worker failed")
             output.seek(0)

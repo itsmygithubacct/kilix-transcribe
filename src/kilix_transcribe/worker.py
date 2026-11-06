@@ -54,6 +54,12 @@ def main() -> None:
     resource.setrlimit(resource.RLIMIT_NOFILE, (64, 64))
     os.umask(0o077)
     request = json.loads(sys.stdin.buffer.read(65_537))
+    from kilix_transcribe.failure import guard
+    guard(request.get("workspace"), lambda: _execute(request))
+
+
+def _execute(request) -> None:
+    from kilix_transcribe.failure import CorruptInput
     runtime_fds = request["runtime_fds"]
     guard = () if request.get("_lease_guard_fd") is None else (request["_lease_guard_fd"],)
     args = request["args"]
@@ -71,15 +77,18 @@ def main() -> None:
               "-ar", "16000", "-c:a", "pcm_s16le", "-f", "wav", str(decoded)],
              pass_fds=(audio_fd, decoder_fd, *guard))
         os.close(audio_fd)
-        with wave.open(str(decoded), "rb") as audio:
-            frames = audio.getnframes()
-            if not 0 < frames <= MAX_AUDIO_SECONDS * 16000:
-                raise ValueError("audio duration exceeds bound")
-            silence = True
-            while block := audio.readframes(16000):
-                if any(block):
-                    silence = False
-                    break
+        try:
+            with wave.open(str(decoded), "rb") as audio:
+                frames = audio.getnframes()
+                if not 0 < frames <= MAX_AUDIO_SECONDS * 16000:
+                    raise ValueError("audio duration exceeds bound")
+                silence = True
+                while block := audio.readframes(16000):
+                    if any(block):
+                        silence = False
+                        break
+        except (wave.Error, EOFError) as error:
+            raise CorruptInput("corrupt audio") from error
         duration_ms = (frames * 1000 + 15999) // 16000
         model = manifest["model"]
         segments = []
