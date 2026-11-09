@@ -11,8 +11,9 @@ retaining a second copy.
 qualified release profile (see [Candidate boundaries](#candidate-boundaries)).
 It is not installed with Plebian-OS by default: Kilix stages a pinned commit
 with `kilix transcribe prepare` and runs it with `kilix transcribe serve`. Its
-catalog model, `whisper-tiny-ggml`, is a Kilix Content asset that downloads on
-first use after its licence screen; no weights ship in the ISO. Plebian-OS
+catalog assets, `whisper-tiny-ggml` and the CPU diarization model
+`kilix-diarization-cpu`, are Kilix Content assets that download on first use
+after their licence screens; no weights ship in the ISO. Plebian-OS
 provisioning separately installs the diarization conversion software (no
 models) from this repository's `rc6-diarization-converter-20261014` release
 asset; that code lives on the `rc6-release-20261014` branch, not on `main`.
@@ -94,8 +95,9 @@ kilix-transcribe file / record      Voicebox
 Each job has a dedicated Linux descendant supervisor. A deadline, client
 disconnect, service shutdown, or cancellation stops and reaps the worker and
 decoder/engine children, including children that create another session.
-Inputs, engines and model bytes are copied into sealed memory files after size
-and SHA-256 checks, so a replaced file on disk cannot substitute bytes. The
+Input audio is copied from the client's descriptor into a private temporary
+file after size and SHA-256 checks; engines and model bytes are copied into
+sealed memory files, so a replaced file on disk cannot substitute bytes. The
 full description is in [docs/running.md](docs/running.md); model selection
 through Kilix Content and shared device leases are in
 [docs/installed-models.md](docs/installed-models.md).
@@ -134,7 +136,8 @@ license receipts or release pins are included.
   which stages and runs this provider.
 - [kilix-content](https://github.com/itsmygithubacct/kilix-content#readme) and
   [kilix-license](https://github.com/itsmygithubacct/kilix-license#readme): the
-  model catalog and the licence receipts every job checks.
+  model catalog and the licence receipts checked for every job on an installed
+  model.
 - [kilix-voice](https://github.com/itsmygithubacct/kilix-voice#readme): the
   managed microphone and the voice energy detector `record` uses.
 - [kilix-voicebox](https://github.com/itsmygithubacct/kilix-voicebox#readme):
