@@ -1,0 +1,7 @@
+#!/bin/sh
+set -eu
+if [ "${1:-}" = configure ]; then
+    /usr/libexec/kilix-diarization-converter/install-converter
+fi
+#DEBHELPER#
+exit 0

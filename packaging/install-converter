@@ -1,0 +1,190 @@
+#!/usr/bin/python3 -IB
+"""Install the optional, pinned diarization conversion software (no models)."""
+
+import argparse
+import fcntl
+import hashlib
+import os
+from pathlib import Path, PurePosixPath
+import platform
+import shutil
+import stat
+import subprocess
+import tarfile
+import tempfile
+
+ARCHIVE_URL = (
+    "https://github.com/itsmygithubacct/kilix-transcribe/releases/download/"
+    "rc6-diarization-converter-20261014/"
+    "kilix-diarization-converter-cc543b5-linux-x86_64.tar.zst"
+)
+ARCHIVE_SHA256 = "32034c46d8986d21b6068279e0c03fbe3dedab0afa833f88b0715ebb86d92a0c"
+ARCHIVE_SIZE = 195_594_149
+MAX_UNPACKED_BYTES = 1200 * 1024 * 1024
+MAX_MEMBERS = 50000
+DESTINATION = Path("/usr/lib/plebian-os/kilix-diarization-convert")
+
+
+def secure_directory(path):
+    for directory in reversed((path, *path.parents)):
+        if not directory.exists():
+            directory.mkdir(mode=0o755)
+            directory.chmod(0o755)
+        info = directory.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+            raise ValueError(f"directory is not root-controlled: {directory}")
+
+
+def copy_archive(source, destination):
+    fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_size != ARCHIVE_SIZE:
+            raise ValueError("archive is not a regular file of the pinned size")
+        with destination.open("xb") as output:
+            remaining = ARCHIVE_SIZE
+            while remaining:
+                block = stream.read(min(remaining, 1024 * 1024))
+                if not block:
+                    raise ValueError("archive changed during copy")
+                output.write(block)
+                remaining -= len(block)
+            if stream.read(1):
+                raise ValueError("archive grew during copy")
+
+
+def verify_archive(path):
+    if path.stat().st_size != ARCHIVE_SIZE:
+        raise ValueError("converter archive size mismatch")
+    with path.open("rb") as stream:
+        if hashlib.file_digest(stream, "sha256").hexdigest() != ARCHIVE_SHA256:
+            raise ValueError("converter archive SHA-256 mismatch")
+
+
+def extract_payload(stream, destination):
+    """Extract bounded ordinary files only, without trusting tar metadata."""
+    seen = set()
+    total = 0
+    with tarfile.open(fileobj=stream, mode="r|") as archive:
+        for member in archive:
+            name = member.name.removeprefix("./").rstrip("/")
+            if name in ("", ".") and member.isdir():
+                continue
+            path = PurePosixPath(name)
+            if (not name or path.is_absolute() or ".." in path.parts
+                    or path.as_posix() != name or name in seen):
+                raise ValueError("unsafe or duplicate converter archive path")
+            seen.add(name)
+            if len(seen) > MAX_MEMBERS:
+                raise ValueError("too many converter archive members")
+            target = destination.joinpath(*path.parts)
+            if member.isdir():
+                target.mkdir(mode=0o755, parents=True, exist_ok=True)
+            elif member.isfile():
+                total += member.size
+                if member.size < 0 or total > MAX_UNPACKED_BYTES:
+                    raise ValueError("converter archive exceeds extraction bound")
+                target.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+                with archive.extractfile(member) as source, target.open("xb") as output:
+                    shutil.copyfileobj(source, output, 1024 * 1024)
+                target.chmod(0o755 if member.mode & 0o111 else 0o644)
+            else:
+                raise ValueError("converter archive contains a link or special file")
+    for directory, _subdirs, _files in os.walk(destination):
+        Path(directory).chmod(0o755)
+    for name in ("bin/kilix-diarization-convert", "python/bin/python3.12", "tool.json"):
+        if not (destination / name).is_file():
+            raise ValueError(f"converter archive missing {name}")
+
+
+def inventory(root):
+    records = {}
+    for directory, subdirs, files in os.walk(root, followlinks=False):
+        for name in subdirs + files:
+            path = Path(directory) / name
+            info = path.lstat()
+            if info.st_uid != 0 or info.st_mode & 0o022:
+                raise ValueError(f"installed converter entry is not root-controlled: {path}")
+            relative = path.relative_to(root).as_posix()
+            if stat.S_ISREG(info.st_mode):
+                with path.open("rb") as stream:
+                    records[relative] = (stat.S_IMODE(info.st_mode), hashlib.file_digest(stream, "sha256").hexdigest())
+            elif stat.S_ISDIR(info.st_mode):
+                records[relative] = (0o755, None)
+            else:
+                raise ValueError(f"installed converter contains a link or special file: {path}")
+    return records
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--archive", type=Path, help="use a local copy of the exact pinned archive")
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args()
+    if ARCHIVE_SIZE <= 0 or len(ARCHIVE_SHA256) != 64:
+        raise ValueError("converter release archive has not been selected")
+    if args.dry_run:
+        print(f"Optional software only; no model weights or licence receipts.\n{ARCHIVE_URL}\n"
+              f"bytes={ARCHIVE_SIZE} sha256={ARCHIVE_SHA256}\nInstall at {DESTINATION}")
+        return
+    if os.geteuid() != 0 or platform.machine() != "x86_64":
+        raise ValueError("run as root on x86_64")
+    for package in ("libgomp1", "libgfortran5", "libquadmath0"):
+        dependency = subprocess.run(
+            ["/usr/bin/dpkg-query", "-W", "-f=${db:Status-Status}", package + ":amd64"],
+            capture_output=True, text=True,
+        )
+        if dependency.returncode or dependency.stdout.strip() != "installed":
+            raise ValueError(f"install the Debian {package} package before the converter")
+    secure_directory(DESTINATION.parent)
+    lock_fd = os.open(DESTINATION.parent / ".diarization-converter.lock",
+                      os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(lock_fd, "w") as lock:
+        info = os.fstat(lock.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o077:
+            raise ValueError("unsafe converter installation lock")
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if shutil.disk_usage(DESTINATION.parent).free < ARCHIVE_SIZE + MAX_UNPACKED_BYTES:
+            raise ValueError("insufficient free space for converter download and staging")
+        with tempfile.TemporaryDirectory(prefix=".diarization-", dir=DESTINATION.parent) as temporary:
+            stage = Path(temporary)
+            archive = stage / "converter.tar.zst"
+            if args.archive:
+                copy_archive(args.archive, archive)
+            else:
+                subprocess.run(["/usr/bin/curl", "--fail", "--location", "--silent", "--show-error",
+                                "--proto", "=https", "--proto-redir", "=https", "--connect-timeout", "20",
+                                "--max-time", "900", "--max-filesize", str(ARCHIVE_SIZE),
+                                "--output", str(archive), ARCHIVE_URL], check=True)
+            verify_archive(archive)
+            payload = stage / "payload"
+            payload.mkdir(mode=0o755)
+            process = subprocess.Popen(["/usr/bin/zstd", "--decompress", "--stdout", str(archive)], stdout=subprocess.PIPE)
+            try:
+                with process.stdout:
+                    extract_payload(process.stdout, payload)
+                    # Consume the trailer so the decompressor also checks its checksum.
+                    while process.stdout.read(1024 * 1024):
+                        pass
+                if process.wait() != 0:
+                    raise ValueError("converter decompression failed")
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait()
+            if os.path.lexists(DESTINATION):
+                secure_directory(DESTINATION)
+                if inventory(DESTINATION) != inventory(payload):
+                    raise ValueError("existing converter differs; refusing to overwrite it")
+                print("Exact converter already installed")
+            else:
+                payload.rename(DESTINATION)
+                print(f"Installed converter at {DESTINATION}")
+    print("Next, as your normal user: kilix models install kilix-diarization-cpu")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (OSError, ValueError, tarfile.TarError, subprocess.SubprocessError) as error:
+        raise SystemExit(f"diarization converter: {error}")

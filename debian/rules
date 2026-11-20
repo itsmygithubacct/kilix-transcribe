@@ -1,0 +1,28 @@
+#!/usr/bin/make -f
+# Install the checksum-pinned converter when the package is configured.
+# The archive is not a member of the deb. Model weights stay outside.
+
+export DEB_BUILD_OPTIONS := noautodbgsym
+
+D := debian/kilix-diarization-converter
+L := $(D)/usr/libexec/kilix-diarization-converter
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	python3 -m py_compile packaging/install-converter
+	rm -rf packaging/__pycache__
+
+override_dh_auto_test:
+
+override_dh_auto_install:
+	install -d $(L)
+	install -m 0755 packaging/install-converter $(L)/install-converter
+	chmod -R a+rX $(D)
+	chmod a+x $(L)/install-converter
+	if find $(D) \( -name '*.nrt' -o -name '*.onnx' -o -name '*.gguf' -o -name '*.safetensors' -o -name '*.tar.zst' -o -name 'runtime.tar' \) | grep -q .; then exit 1; fi
+	test -x $(L)/install-converter
+
+override_dh_auto_clean:
+	rm -rf packaging/__pycache__
