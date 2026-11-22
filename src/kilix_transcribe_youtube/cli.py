@@ -87,6 +87,16 @@ def _transcribe(argv: list[str], fetcher_factory, transport, environ) -> int:
                     f"{record['wer_normalized']:.2%} normalized, {record['wer_raw']:.2%} raw")
         else:
             _stderr("no uploader caption track to score against")
+    previous_path = run / "result.json"
+    if not args.score and previous_path.is_file():
+        # A run without --score keeps the score an earlier run measured.
+        try:
+            previous = json.loads(previous_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            previous = {}
+        for name in ("wer_normalized", "wer_raw", "reference"):
+            if name in previous:
+                record[name] = previous[name]
     (run / "result.json").write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
     (run / "result.json").chmod(0o600)
 

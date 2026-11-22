@@ -393,6 +393,16 @@ class EndToEndTests(TempHome):
         self.assertEqual(record["wer_normalized"], 0.0)
         self.assertNotIn(KEY, out + err + json.dumps(record))
 
+    def test_a_run_without_score_keeps_the_earlier_score(self) -> None:
+        self.write_key()
+        code, out, err = self.invoke(VID, "--score")
+        self.assertEqual(code, 0, err)
+        code, out, err = self.invoke(VID, "--format", "srt", service=FakeService([]))
+        self.assertEqual(code, 0, err)
+        record = json.loads((self.root / "runs" / VID / "result.json").read_text())
+        self.assertEqual(record["wer_normalized"], 0.0)
+        self.assertEqual(record["reference"], "audio.en-US.json3")
+
     def test_with_captions_only_json_mode_is_requested(self) -> None:
         self.write_key()
         service = FakeService([(200, text_reply("Okay, so Qwen models are here.", 5.0))])
