@@ -16,7 +16,8 @@ catalog assets, `whisper-tiny-ggml` and the CPU diarization model
 after their licence screens; no weights ship in the ISO. Plebian-OS
 provisioning separately installs the diarization conversion software (no
 models) from this repository's `rc6-diarization-converter-20261014` release
-asset; that code lives on the `rc6-release-20261014` branch, not on `main`.
+asset, built from the converter tools in this repository
+([docs/diarization.md](docs/diarization.md)).
 
 ## What it does
 
@@ -112,11 +113,13 @@ through Kilix Content and shared device leases are in
 This is a working development runtime, **not a qualified release profile**.
 Its digest-bound `kilix.transcribe.runtime/v1` manifest is not an F100 install
 authority or license receipt. Production asset admission, F106 binding,
-resource admission, GPU profiles, combined corpus/soak qualification,
-streaming recognition, neural VAD and diarization remain open. The managed
-recording and optional legacy energy detector below are development paths.
-Unsupported diarization refuses explicitly. Commands that
-need an unstaged runtime retain `RUNTIME_UNSELECTED` and exit 69.
+resource admission, GPU profiles and combined corpus/soak qualification
+remain open. Incremental recognition has a development implementation
+([docs/streaming.md](docs/streaming.md)); physical/model qualification and
+neural VAD remain open. The managed recording and optional legacy energy
+detector below are development paths. Speaker turns require the separate exact
+runtime and an explicit session ([docs/diarization.md](docs/diarization.md)).
+Commands that need an unstaged runtime retain `RUNTIME_UNSELECTED` and exit 69.
 
 The existing design ledger in `design/transcribe-candidate-v1.json` preserves
 48 requirements, eight accepted source candidates and four unselected release
@@ -132,6 +135,10 @@ license receipts or release pins are included.
   descriptors, receipt checks, tests, and shared execution coordination.
 - [docs/recording-and-client.md](docs/recording-and-client.md): managed
   microphone recording and controlled client delivery.
+- [docs/diarization.md](docs/diarization.md): the CPU speaker-turn route,
+  its explicit sessions and the receipt-gated conversion tool.
+- [docs/streaming.md](docs/streaming.md): incremental transcript revisions
+  (`--stream`) and their bounds.
 - [docs/youtube.md](docs/youtube.md): `kilix-transcribe-youtube`, its private
   data directory, and the measurements that chose its method.
 - [design/transcribe-candidate-v1.json](design/transcribe-candidate-v1.json):

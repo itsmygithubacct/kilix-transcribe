@@ -10,12 +10,13 @@ from __future__ import annotations
 
 import hashlib
 import ctypes
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 import fcntl
 import json
 import os
 from pathlib import Path
 import stat
+import select
 import subprocess
 import sys
 import tempfile
@@ -78,9 +79,10 @@ def private_directory(path: Path, *, create: bool = False) -> Path:
 
 
 class InstalledRuntime:
-    def __init__(self, root: Path, *, model_source=None):
+    def __init__(self, root: Path, *, model_source=None, diarization_runtime=None):
         self.root = private_directory(root)
         self.model_source = model_source
+        self.diarization_runtime = diarization_runtime
         root_fd, self._directories = self._open_root()
         os.close(root_fd)
         manifest = root / "runtime.json"
@@ -220,7 +222,9 @@ class InstalledRuntime:
         return {"id": self.model_id, "revision": self.model_revision,
                 "engine_id": "whisper.cpp", "engine_revision": ENGINE_COMMIT,
                 "installed": True, "release_qualified": False,
-                "capabilities": ["transcribe", "translate", "language_id", "word_timestamps"]}
+                "capabilities": ["transcribe", "translate", "language_id", "word_timestamps",
+                                 "unstable_partials", "streaming"]
+                                 + (["diarize"] if self.diarization_runtime is not None else [])}
 
 
 def stop_process(process: subprocess.Popen) -> None:
@@ -238,15 +242,15 @@ def stop_process(process: subprocess.Popen) -> None:
 def run_job(runtime: InstalledRuntime, audio_fd: int, args: dict, *,
             deadline: float, cancel: threading.Event,
             disconnected: Callable[[], bool] = lambda: False,
-            execution_policy=None, job_id=None, progress=None) -> dict:
+            execution_policy=None, job_id=None, progress=None, updates=None) -> dict:
     from .owned import OwnedExecution
     with OwnedExecution(execution_policy, job_id=job_id, workload="stt-job", deadline=deadline,
                         cancelled=cancel.is_set, disconnected=disconnected, progress=progress) as owner:
         return _run_owned_job(runtime, audio_fd, args, deadline=deadline, cancel=cancel,
-                              disconnected=disconnected, owner=owner)
+                              disconnected=disconnected, owner=owner, updates=updates)
 
 
-def _run_owned_job(runtime, audio_fd, args, *, deadline, cancel, disconnected, owner):
+def _run_owned_job(runtime, audio_fd, args, *, deadline, cancel, disconnected, owner, updates=None):
     if cancel.is_set() or disconnected():
         raise ProtocolError("CANCELED", "job canceled")
     if time.monotonic() >= deadline:
@@ -258,8 +262,14 @@ def _run_owned_job(runtime, audio_fd, args, *, deadline, cancel, disconnected, o
         if time.monotonic() >= deadline:
             raise ProtocolError("DEADLINE_EXCEEDED", "job deadline exceeded")
     runtime.verify_unchanged(check)
+    diarization = getattr(runtime, 'diarization_runtime', None)
     if args["task"] == "diarize":
-        raise ProtocolError("UNSUPPORTED_CAPABILITY", "no diarization profile is installed")
+        if diarization is None:
+            raise ProtocolError("UNSUPPORTED_CAPABILITY", "no diarization profile is installed")
+        if args.get('diarization_session') is not True:
+            raise ProtocolError("INVALID_REQUEST", "diarization requires an explicit session")
+        if args['output'] != 'json' or args.get('stream'):
+            raise ProtocolError("UNSUPPORTED_CAPABILITY", "session diarization requires final JSON output")
     if not 0 < os.fstat(audio_fd).st_size <= MAX_INPUT_BYTES:
         raise ProtocolError("LIMIT_EXCEEDED", "audio exceeds the runtime input bound")
     # File descriptors carry audio; the isolated worker's argv carries no text,
@@ -267,19 +277,64 @@ def _run_owned_job(runtime, audio_fd, args, *, deadline, cancel, disconnected, o
     worker = Path(__file__).with_name("supervisor.py")
     environment = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8",
                    "OMP_NUM_THREADS": "2", "OPENBLAS_NUM_THREADS": "2"}
-    with runtime.snapshots(check) as runtime_fds, tempfile.TemporaryDirectory(prefix="kilix-transcribe-job-") as workspace, tempfile.TemporaryFile() as output:
+    with ExitStack() as stack, runtime.snapshots(check) as runtime_fds, tempfile.TemporaryDirectory(prefix="kilix-transcribe-job-") as workspace, tempfile.TemporaryFile() as output:
         job = {"runtime_fds": runtime_fds, "manifest": runtime.manifest,
                "audio_fd": audio_fd, "args": args,
-               "workspace": workspace}
+               "workspace": workspace, "deadline": deadline}
+        diarization_fds = {}
+        if args['task'] == 'diarize':
+            diarization_fds = stack.enter_context(diarization.snapshots(check))
+            job['diarization'] = {'manifest':diarization.manifest, 'fds':diarization_fds,
+                                 'manifest_sha256':diarization.manifest_sha256}
         process = owner.spawn(
             [sys.executable, "-I", str(worker)], stdin=subprocess.PIPE,
-            stdout=output, stderr=subprocess.DEVNULL, env=environment,
-            pass_fds=(audio_fd, *runtime_fds.values()), start_new_session=True,
+            stdout=subprocess.PIPE if args.get("stream") else output,
+            stderr=subprocess.DEVNULL, env=environment,
+            pass_fds=(audio_fd, *runtime_fds.values(), *diarization_fds.values()), start_new_session=True,
         )
         try:
             assert process.stdin is not None
             process.stdin.write(json.dumps(job, separators=(",", ":")).encode())
             process.stdin.close()
+            if args.get("stream"):
+                from .streaming import WorkerFrames, SegmentStream
+                from .protocol import encode_payload
+                frames = WorkerFrames(MAX_RESULT_BYTES + 65_536)
+                state = SegmentStream(args["task"])
+                result = None
+                eof = False
+                while not eof or process.poll() is None:
+                    check()
+                    if eof:
+                        cancel.wait(0.025)
+                        continue
+                    if not select.select([process.stdout], [], [], 0.025)[0]:
+                        continue
+                    block = os.read(process.stdout.fileno(), min(65_536, frames.wanted))
+                    if not block:
+                        frames.eof()
+                        eof = True
+                        continue
+                    value = frames.feed(block)
+                    if value is None:
+                        continue
+                    if result is not None or set(value) != {"type", "result"}:
+                        raise ProtocolError("ENGINE_FAILED", "unexpected worker stream frame")
+                    if value["type"] == "update":
+                        encode_payload(value)  # Updates may never use the larger final-frame bound.
+                        state.apply(value["result"])
+                        check()
+                        if updates is not None:
+                            updates(value["result"])
+                    elif value["type"] == "result" and type(value["result"]) is dict:
+                        result = value["result"]
+                        state.finish(result)
+                    else:
+                        raise ProtocolError("ENGINE_FAILED", "unknown worker stream frame")
+                check()
+                if process.returncode != 0 or result is None or result.get("engine_revision") != ENGINE_COMMIT:
+                    raise ProtocolError("ENGINE_FAILED", "streaming worker failed or ended without a final")
+                return result
             while process.poll() is None:
                 owner.check()
                 if cancel.is_set() or disconnected():
@@ -305,4 +360,8 @@ def _run_owned_job(runtime, audio_fd, args, *, deadline, cancel, disconnected, o
                 raise ProtocolError("ENGINE_FAILED", "unbound worker result")
             return result
         finally:
-            owner.finish(process, stop_process)
+            try:
+                owner.finish(process, stop_process)
+            finally:
+                if process.stdout is not None:
+                    process.stdout.close()

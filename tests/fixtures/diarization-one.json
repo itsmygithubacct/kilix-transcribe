@@ -1,0 +1,62 @@
+{
+  "schema": "f104.diarization.diagnostics/2.1",
+  "algorithm": "f104-diarization-algorithm/2.1",
+  "state": "DEVELOPMENT",
+  "sample_rate": 16000,
+  "samples": 6400,
+  "status": "OK",
+  "error_code": null,
+  "score_domain": "FINITE_NEURAL_SCORES_UNVERIFIED_DOMAIN",
+  "scores": [
+    {
+      "chunk": 0,
+      "offset_samples": 0,
+      "frames": 589,
+      "classes": 7,
+      "byte_offset": 0,
+      "byte_count": 16492
+    }
+  ],
+  "score_bytes": 16492,
+  "mappings": [
+    {
+      "chunk": 0,
+      "slot": 0,
+      "cluster": 0,
+      "reason": "MAPPED"
+    }
+  ],
+  "embedding_rejections": [],
+  "assignments": [
+    {
+      "chunk": 0,
+      "slot": 0,
+      "cluster": 0,
+      "assigned_cosine_distance": 0,
+      "alternative_cosine_distance": null,
+      "margin": null
+    }
+  ],
+  "activity": [
+    {
+      "chunk": 0,
+      "slot": 0,
+      "cluster": 0,
+      "start2": 0,
+      "end2": 12800,
+      "start_ms": 0,
+      "end_ms": 400
+    }
+  ],
+  "turns": [
+    {
+      "cluster": 0,
+      "start2": 0,
+      "end2": 12800,
+      "start_ms": 0,
+      "end_ms": 400
+    }
+  ],
+  "confidence": null,
+  "calibration_binding": null
+}

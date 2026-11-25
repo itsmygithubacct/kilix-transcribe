@@ -77,6 +77,10 @@ def main():
         return 125
     request = json.loads(payload)
     descriptors = list(request.get("runtime_fds", {}).values())
+    # The server-selected speaker graph/native snapshots must reach the same
+    # owned worker; the client never supplies or selects this descriptor map.
+    if 'diarization' in request:
+        descriptors.extend(request['diarization']['fds'].values())
     if request.get("audio_fd") is not None:
         descriptors.append(request["audio_fd"])
     if guard_fd is not None:

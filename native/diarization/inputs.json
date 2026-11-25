@@ -1,0 +1,48 @@
+{
+  "sherpa_revision": "1cb484af5e69d3c7803c1eb0b3b5ab8041e0e911",
+  "source_snapshot_revision": "526a436cd6d51714c294f9458143a176775e43cf",
+  "source_archive_sha256": "5093f078d3a504872af61af281a4dce685163f4ba53c5ecb8d684cf7bcb03f29",
+  "ort_version": "1.27.1",
+  "dependencies": {
+    "eigen.tar.gz": {
+      "bytes": 2705005,
+      "sha256": "8586084f71f9bde545ee7fa6d00288b264a2b7ac3607b974e54d13e7162c1c72"
+    },
+    "hclust-cpp.tar.gz": {
+      "bytes": 22523,
+      "sha256": "8f14e024c709d73afb40ae69cb22de4b73dba67cbce40f2e518813da8139ab56"
+    },
+    "kaldi-decoder.tar.gz": {
+      "bytes": 51199,
+      "sha256": "b9f34cfb4fd3b1344100eead79ef4d37aa15962274b9e3056de345021f76a1b0"
+    },
+    "kaldi-native-fbank.tar.gz": {
+      "bytes": 71144,
+      "sha256": "9176cc66fc7ce1edf85cf355b06e320c57db6297df74277f575183468893cf61"
+    },
+    "kaldifst.tar.gz": {
+      "bytes": 172147,
+      "sha256": "3f247b7e5a2409071202f5e2bc6200060f66728c0a3443c03923ad2723e040b3"
+    },
+    "kissfft.zip": {
+      "bytes": 74252,
+      "sha256": "497103e664168ebe39580b757adbe616f6cf85a16572af581ca7bc42d0ab13fd"
+    },
+    "nlohmann-json.tar.gz": {
+      "bytes": 9678593,
+      "sha256": "4b92eb0c06d10683f7447ce9406cb97cd4b453be18d7279320f7b2f025c10187"
+    },
+    "onnxruntime.zip": {
+      "bytes": 8510309,
+      "sha256": "3b49aa3cded130124e1822c9683f0450bd120390f14a626369fd7a02f5b5f64e"
+    },
+    "openfst.tar.gz": {
+      "bytes": 1500835,
+      "sha256": "c3549940384cbe4fa9f18c2bcfb1bfbd0a80492fd1b0bfa27433cee395a6a199"
+    },
+    "simple-sentencepiece.tar.gz": {
+      "bytes": 355335,
+      "sha256": "1748a822060a35baa9f6609f84efc8eb54dc0e74b9ece3d82367b7119fdc75af"
+    }
+  }
+}

@@ -1,5 +1,6 @@
 """Strict result documents bound to control metadata and source requests."""
 from __future__ import annotations
+import json
 
 from .protocol import ProtocolError, decode_payload
 from .surface import RESULT_SCHEMA, SegmentUpdate, SurfaceError, Transcript, WordTiming, render_transcript
@@ -12,6 +13,8 @@ def decode_result(payload: bytes, metadata: dict, arguments: dict) -> dict:
         value = decode_payload(payload, maximum_bytes=MAX_RESULT_BYTES, maximum_nodes=1_000_000)
         expected = {"schema", "engine", "model", "language", "segments", "task",
                     "engine_revision", "model_revision", "duration_ms", "text", "output_format", "output"}
+        if arguments['task'] == 'diarize':
+            expected.add('diarization')
         if set(value) != expected or value["schema"] != RESULT_SCHEMA:
             raise ValueError("invalid result population")
         if (type(value["engine"]) is not dict or set(value["engine"]) != {"id"}
@@ -50,8 +53,17 @@ def decode_result(payload: bytes, metadata: dict, arguments: dict) -> dict:
                                           speaker.get("id"), speaker.get("confidence")))
         transcript = Transcript(value["task"], value["engine"]["id"], value["model"]["id"],
                                 value["language"], tuple(segments))
-        if (value["text"] != render_transcript(transcript, "text")
-                or value["output"] != render_transcript(transcript, value["output_format"])):
+        output = render_transcript(transcript, value['output_format'])
+        if arguments['task'] == 'diarize':
+            from .diarization import validate_annotation
+            if arguments.get('diarization_session') is not True or arguments['output'] != 'json':
+                raise ValueError('unrequested session annotation')
+            annotation = validate_annotation(value['diarization'],value)
+            rendered = json.loads(output)
+            rendered['diarization'] = annotation
+            output = json.dumps(rendered, allow_nan=False, ensure_ascii=False,
+                                sort_keys=True, separators=(',',':')) + '\n'
+        if (value["text"] != render_transcript(transcript, "text") or value["output"] != output):
             raise ValueError("serialized result mismatch")
         return value
     except ProtocolError as error:

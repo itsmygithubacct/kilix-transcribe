@@ -297,7 +297,7 @@ def _segment_payload(segment: SegmentUpdate) -> dict[str, Any]:
         "end_ms": segment.end_ms,
         "revision": segment.revision,
         "segment_id": segment.segment_id,
-        "stable": True,
+        "stable": segment.stable,
         "start_ms": segment.start_ms,
         "text": segment.text,
         "words": [_word_payload(word) for word in segment.words],
@@ -336,7 +336,7 @@ def render_transcript(transcript: Transcript, output: str) -> str:
              "OUTPUT", "output is outside the 4/4 candidate population")
 
     if output == "text":
-        text = "\n".join(segment.text for segment in transcript.segments)
+        text = "\n".join(segment.text for segment in transcript.segments if segment.text)
         return _bounded_rendered(f"{text}\n" if text else "")
 
     if output == "json":
@@ -358,7 +358,7 @@ def render_transcript(transcript: Transcript, output: str) -> str:
 
     separator = "." if output == "webvtt" else ","
     blocks: list[str] = []
-    for index, segment in enumerate(transcript.segments, start=1):
+    for index, segment in enumerate((segment for segment in transcript.segments if segment.text), start=1):
         start = _format_timestamp(segment.start_ms, separator)
         end = _format_timestamp(segment.end_ms, separator)
         blocks.append(f"{index}\n{start} --> {end}\n{_escape_cue(segment.text)}")

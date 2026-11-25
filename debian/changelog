@@ -1,0 +1,6 @@
+kilix-diarization-converter (0.20261014+packaging1) UNRELEASED; urgency=medium
+
+  * Install the checksum-pinned converter from the published archive when
+    the package is configured. Model weights stay outside the package.
+
+ -- itsmygithubacct <itsmygithubacct@users.noreply.github.com>  Fri, 20 Nov 2026 09:05:38 +0000

@@ -1,0 +1,18 @@
+Source: kilix-diarization-converter
+Section: sound
+Priority: optional
+Maintainer: itsmygithubacct <itsmygithubacct@users.noreply.github.com>
+Build-Depends: debhelper-compat (= 13), python3
+Standards-Version: 4.7.2
+Homepage: https://github.com/itsmygithubacct/kilix-transcribe
+Vcs-Git: https://github.com/itsmygithubacct/kilix-transcribe.git
+Vcs-Browser: https://github.com/itsmygithubacct/kilix-transcribe
+Rules-Requires-Root: no
+
+Package: kilix-diarization-converter
+Architecture: amd64
+Depends: ${misc:Depends}, python3, curl, ca-certificates, zstd, libgomp1, libgfortran5, libquadmath0
+Description: Kilix diarization converter
+ Checksum-pinned diarization conversion software for amd64. The
+ package downloads the published archive when configured and checks
+ its size and SHA-256. Model weights stay outside this package.

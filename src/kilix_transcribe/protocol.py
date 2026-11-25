@@ -26,6 +26,7 @@ PROTOCOL_SCHEMA = "kilix.transcribe.provider/candidate-v1"
 WIRE_OPERATIONS = ("hello", "submit", "models", "status", "cancel", "unload")
 TASKS = ("transcribe", "translate", "diarize")
 OUTPUTS = ("text", "json", "webvtt", "srt")
+STREAM_FEATURE = "segments-v1"
 FORBIDDEN_FIELDS = frozenset(
     {"path", "url", "command", "shell", "executable", "environment", "module", "import"}
 )
@@ -270,7 +271,8 @@ class ProviderRequest:
         if operation in {"models", "status", "cancel", "unload"}:
             _require(not arguments, "INVALID_REQUEST", "operation takes no arguments")
         elif operation == "hello":
-            _require(set(arguments) == {"protocol_major", "protocol_minor"},
+            _require({"protocol_major", "protocol_minor"} <= set(arguments)
+                     <= {"protocol_major", "protocol_minor", "features"},
                      "INVALID_REQUEST", "hello argument population is invalid")
             _require(type(arguments["protocol_major"]) is int
                      and arguments["protocol_major"] == 1,
@@ -278,6 +280,10 @@ class ProviderRequest:
             _require(type(arguments["protocol_minor"]) is int
                      and arguments["protocol_minor"] >= 0,
                      "INVALID_REQUEST", "protocol minor must be a non-negative integer")
+            if "features" in arguments:
+                _require(arguments["protocol_minor"] >= 1
+                         and arguments["features"] == [STREAM_FEATURE],
+                         "INCOMPATIBLE_PROTOCOL", "streaming feature negotiation is incompatible")
         else:
             cls._validate_submit(arguments)
         return cls(request_id, operation, job_id, arguments, deadline)
@@ -285,7 +291,7 @@ class ProviderRequest:
     @staticmethod
     def _validate_submit(arguments: dict[str, Any]) -> None:
         required = {"task", "language", "output", "audio_fd", "audio"}
-        optional = {"diarization_session"}
+        optional = {"diarization_session", "stream"}
         _require(required <= set(arguments) <= required | optional,
                  "INVALID_REQUEST", "submit argument population is invalid")
         _require(type(arguments["task"]) is str and arguments["task"] in TASKS,
@@ -317,6 +323,9 @@ class ProviderRequest:
                  "diarization_session must be boolean")
         _require(arguments["task"] == "diarize" or not diarization,
                  "INVALID_REQUEST", "diarization_session is scoped to the diarize task")
+        if "stream" in arguments:
+            _require(arguments["stream"] == STREAM_FEATURE,
+                     "INCOMPATIBLE_PROTOCOL", "unsupported streaming feature")
 
 
 def frame_payload(value: dict[str, Any]) -> bytes:
