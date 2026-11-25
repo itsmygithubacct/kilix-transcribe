@@ -28,6 +28,11 @@ asset; that code lives on the `rc6-release-20261014` branch, not on `main`.
   `cancel` and `unload` query and control it.
 - Reads models installed through Kilix Content, with a licence receipt check
   for every job; it never downloads code or models.
+- `kilix-transcribe-youtube`, a separate command in the same package,
+  transcribes a YouTube video with the most accurate method measured on three
+  reference videos: MiniMax `asr-1.0` for the words, timed from YouTube's
+  automatic captions. Unlike the provider, it uploads audio to a hosted
+  service; see [docs/youtube.md](docs/youtube.md).
 
 ## Quick start
 
@@ -127,6 +132,8 @@ license receipts or release pins are included.
   descriptors, receipt checks, tests, and shared execution coordination.
 - [docs/recording-and-client.md](docs/recording-and-client.md): managed
   microphone recording and controlled client delivery.
+- [docs/youtube.md](docs/youtube.md): `kilix-transcribe-youtube`, its private
+  data directory, and the measurements that chose its method.
 - [design/transcribe-candidate-v1.json](design/transcribe-candidate-v1.json):
   the requirement ledger.
 
